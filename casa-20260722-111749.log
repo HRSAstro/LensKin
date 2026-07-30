@@ -1,0 +1,30 @@
+2026-07-22 11:17:54	INFO	::casa	
+2026-07-22 11:17:55	INFO	::casa	data_update using version casarundata-2026.02.19-1.tar.gz, acquiring the lock ... 
+2026-07-22 11:17:55	SEVERE	::casa	
+2026-07-22 11:17:55	SEVERE	::casa	ERROR! Unexpected exception while doing auto updates or checking on the status of the data at measurespath
+2026-07-22 11:17:55	SEVERE	::casa	visit https://casadocs.readthedocs.io/en/stable/notebooks/external-data.html for more information
+2026-07-22 11:17:55	SEVERE	::casa	
+2026-07-22 11:17:55	INFO	::casa	
+2026-07-22 11:17:57	INFO	::casa	Python version 3.10.11
+2026-07-22 11:17:57	INFO	::casa	CASA Version CASALITH 6.6.5.31
+2026-07-22 11:17:57	INFO	::casa	
+2026-07-22 11:17:57	INFO	statwt::::casa	##########################################
+2026-07-22 11:17:57	INFO	statwt::::casa	##### Begin Task: statwt             #####
+2026-07-22 11:17:57	INFO	statwt::::casa	statwt( vis='/Users/hstacey/Work/test_3d_kin/sim3/sim3.alma_0.4arcsec.noisy.ms.statwt', selectdata=True, field='', spw='', intent='', array='', observation='', scan='', combine='', timebin=1, slidetimebin=False, chanbin='spw', minsamp=2, statalg='classic', fence=-1.0, center='mean', lside=True, zscore=-1.0, maxiter=-1, fitspw='', excludechans=False, wtrange=[], flagbackup=True, preview=False, datacolumn='data' )
+2026-07-22 11:17:57	INFO	statwt::::casa	Backup original flags before applying new flags
+2026-07-22 11:17:57	INFO	AgentFlagger::open	Table type is Measurement Set
+2026-07-22 11:17:57	INFO	FlagVersion::saveFlagVersion	Creating new backup flag file called statwt_1
+2026-07-22 11:17:57	INFO	StatWtColConfig::_determineFlags	Updating the SIGMA/SIGMA_SPECTRUM values. WEIGHT/WEIGHT_SPECTRUM will not be recalculated as they are related to the values in the CORRECTED_DATA column.
+2026-07-22 11:17:57	INFO	StatWtTVI::StatWtTVI	Using DATA to compute weights
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeFlagging	Originally, 0% of the data were flagged. StatWtTVI flagged an additional 0%.
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeFlagging	TOTAL FLAGGED DATA AFTER RUNNING STATWT: 0%
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeFlagging	
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeFlagging	SPECTRAL_WINDOW SAMPLES_WITH_NON-ZERO_VARIANCE SAMPLES_WHERE_REAL_PART_VARIANCE_DIFFERS_BY_>50%_FROM_IMAGINARY_PART
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeFlagging	              0                          12250                                                                 5337
+2026-07-22 11:17:57	INFO	StatWtTVI::_logUsedChannels	Weights are being computed using SPW 0, channels 0~15
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeStats	The mean of the computed weights is 133.66
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeStats	The variance of the computed weights is 1347.77
+2026-07-22 11:17:57	INFO	StatWtTVI::summarizeStats	Weights which had corresponding flags of True prior to running this application were not used to compute these stats.
+2026-07-22 11:17:57	INFO	statwt::::casa	Task statwt complete. Start time: 2026-07-22 13:17:57.248957 End time: 2026-07-22 13:17:57.409233
+2026-07-22 11:17:57	INFO	statwt::::casa	##### End Task: statwt               #####
+2026-07-22 11:17:57	INFO	statwt::::casa	##########################################
