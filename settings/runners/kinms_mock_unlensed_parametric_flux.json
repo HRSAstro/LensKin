@@ -67,7 +67,7 @@
       20,
       20
     ],
-    "use_jax": false,
+    "use_jax": true,
     "transformer": "dft",
     "mask_n_pixels": 40,
     "mask_radius": 2.5,
@@ -101,7 +101,7 @@
       "path_prefix": "kinms_mock_unlensed_parametric_flux",
       "name": "reconstruction",
       "optimizer": "LBFGS",
-      "use_jax_gradient": false,
+      "use_jax_gradient": true,
       "number_of_cores": 1,
       "maxiter": 200
     },

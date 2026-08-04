@@ -12,8 +12,6 @@ When ``use_jax_gradient`` is enabled in the phase-1 search settings, this class
 passes ``jac=fitness.grad`` so ``eps`` is not used for the gradient.
 """
 
-import copy
-
 import numpy as np
 from autofit.non_linear.search.mle.bfgs.search import AbstractBFGS
 
@@ -31,7 +29,6 @@ class JAXLBFGS(AbstractBFGS):
     def _fit(self, model, analysis):
         from scipy import optimize
 
-        from autofit.non_linear.analysis import Analysis
         from autofit.non_linear.fitness import Fitness
 
         fitness = Fitness(
@@ -74,8 +71,6 @@ class JAXLBFGS(AbstractBFGS):
                 analysis=analysis,
             )
 
-        maxiter = self.config_dict_options.get("maxiter", int(1e8))
-
         def fun(parameters):
             if analysis._use_jax:
                 return float(fitness._jit(parameters))
@@ -84,21 +79,21 @@ class JAXLBFGS(AbstractBFGS):
         def jac(parameters):
             return np.asarray(fitness.grad(parameters), dtype=float)
 
-        while total_iterations < maxiter:
-            iterations_remaining = maxiter - total_iterations
-            iterations = min(self.iterations_per_full_update, iterations_remaining)
+        while total_iterations < self.maxiter:
+            iterations_remaining = self.maxiter - total_iterations
+            iterations = self._steps_until_full_update(iterations_remaining)
 
             if iterations > 0:
-                config_dict_options = copy.deepcopy(self.config_dict_options)
-                config_dict_options["maxiter"] = iterations
+                options = dict(self.options)
+                options["maxiter"] = iterations
 
                 search_internal = optimize.minimize(
                     fun=fun,
                     x0=x0,
                     jac=jac,
                     method=self.method,
-                    options=config_dict_options,
-                    **self.config_dict_search,
+                    options=options,
+                    tol=self.tol,
                 )
 
                 total_iterations += search_internal.nit
