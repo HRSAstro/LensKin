@@ -29,6 +29,7 @@ from src.pipelines.pixelized_plots import (
 from src.pipelines.lens_model import (
     free_lens_centre_from_settings,
     lens_galaxy_model_from_settings,
+    validate_lensing_settings,
 )
 from src.pipelines.runner import build_tracer, load_cube_data, load_settings
 from src.pipelines.priors import source_model_from_profile
@@ -63,6 +64,7 @@ def _phase2_model_from_settings(settings, profile, priors_cfg, *, phase1_lens_ce
 
 
 def run_from_settings(settings):
+    validate_lensing_settings(settings)
     mode = validate_normalization_settings(settings)
 
     af.conf.instance.push(
@@ -71,6 +73,7 @@ def run_from_settings(settings):
     )
 
     frequencies, uv_wavelengths, visibilities, sigma = load_cube_data(settings)
+    autolens_utils.resolve_image_plane_grid_in_settings(settings, uv_wavelengths)
 
     n_pixels, pixel_scale, _ = autolens_utils.image_plane_grid_from_settings(settings)
     image_plane_grid_3d = Grid3D.uniform(

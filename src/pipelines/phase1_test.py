@@ -350,7 +350,11 @@ def run_workspace_style_fit(
         dataset=dataset,
         tracer=tracer,
         adapt_images=adapt_images,
-        settings=al.Settings(use_positive_only_solver=False),
+        settings=al.Settings(
+            use_positive_only_solver=reconstruction.use_positive_only_solver_from_settings(
+                settings
+            )
+        ),
     )
 
     save_workspace_style_plots(
@@ -446,6 +450,8 @@ def save_workspace_style_plots(fit, output_dir, settings, mesh_type=None):
         path=output_dir / "fit_triplet.png",
         titles=("Dirty data", "Dirty model", "Residuals"),
         extent=extent,
+        scale_mode="sigma",
+        residual_sigma=autolens_utils.dirty_noise_map_mc_from_fit(fit),
     )
 
     inversion = fit.inversion

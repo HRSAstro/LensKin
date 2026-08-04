@@ -15,6 +15,7 @@
   "redshift_lens": 0.404,
   "redshift_source": 2.7855,
   "n_pixels": 40,
+  "pixel_scale": "nyquist",
   "real_space_width": 5.0,
   "source_grid": {
     "n_pixels": 256
@@ -72,6 +73,7 @@
     "delaunay_edge_pixels": 30,
     "flux_threshold": 0.0,
     "max_radius": null,
+    "use_positive_only_solver": true,
     "sb_input_units": "jy_per_pixel_per_channel",
     "moment0": {
       "sigma_mode": "independent_mean",
@@ -79,9 +81,20 @@
       "uv_mode": "average"
     },
     "regularization": {
-      "type": "constant_split",
-      "prior_type": "fixed",
-      "value": 100000.0
+      "type": "adapt_split",
+      "prior_type": "log_uniform",
+      "inner_coefficient": {
+        "lower_limit": 0.01,
+        "upper_limit": 100.0
+      },
+      "outer_coefficient": {
+        "prior_type": "fixed",
+        "value": 30.0
+      },
+      "signal_scale": {
+        "prior_type": "fixed",
+        "value": 3.0
+      }
     },
     "search": {
       "path_prefix": "kinms_mock_lensed_pixelized",
@@ -89,7 +102,8 @@
       "optimizer": "LBFGS",
       "use_jax_gradient": false,
       "number_of_cores": 8,
-      "maxiter": 1000
+      "maxiter": 1000,
+      "figure_of_merit": "log_likelihood_with_regularization"
     },
     "clouds_per_pixel": 1024,
     "disk_scale_height_kpc": 0.1

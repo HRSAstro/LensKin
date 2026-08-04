@@ -16,6 +16,7 @@ for _parent in Path(__file__).resolve().parents:
 import argparse
 
 from scripts.bootstrap import setup
+from src.pipelines.lens_model import validate_lensing_settings
 from src.pipelines.normalization import requires_phase1, validate_normalization_settings
 from src.pipelines.runner import load_settings, run_from_settings as run_single_phase
 from src.pipelines.runner_pixelized import run_from_settings as run_two_phase
@@ -31,6 +32,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     settings = load_settings(args.settings)
+    validate_lensing_settings(settings)
     mode = validate_normalization_settings(settings)
     if requires_phase1(mode):
         run_two_phase(settings)

@@ -19,6 +19,7 @@ LensKin/
 │   ├── profile_phase1_regularization.py  # Reg-coefficient / FoM diagnostics
 │   ├── check_moment0_noise.py        # Moment-0 vs channel noise diagnostic
 │   ├── generate_unlensed_mock_and_diagnose.py  # Unlensed KinMS self-mock + truth diagnostics
+│   ├── smoke_unlensed_three_modes.py          # Lens-off smoke test (all normalization modes)
 │   ├── generate_lensed_mock_and_diagnose.py    # Lensed KinMS self-mock + parametric truth diagnostics
 │   ├── generate_lensed_mock_pixelized_and_diagnose.py  # Lensed mock + KinMSPixelized truth diagnostics
 │   ├── trial_source_grid_regularization.py    # Phase-1 grid/reg scan vs pixelized truth floor
@@ -65,6 +66,8 @@ python scripts/runners/kinms_mock_parametric_flux.py
 Override settings with `--settings /path/to/custom.json`.
 
 `scripts/run_fit.py` dispatches automatically on `normalization_mode` in the settings file. `scripts/run_pixelized_fit.py` remains as a legacy entry point for two-phase KinMS fits.
+
+Image-plane pixel scale defaults to Nyquist sampling of the longest baseline (`0.5 × λ/b_max`); see [Image-plane grid (Nyquist default)](#image-plane-grid-nyquist-default).
 
 ## KinMS source normalization modes
 
@@ -170,9 +173,109 @@ For backward compatibility, `model_name: "KinMSPixelized"` without an explicit `
 
 GalPaK fits always use mode 1 semantics (`normalization_mode` must be `"parametric"` or omitted).
 
+## Turning lensing off
+
+Set a first-class flag in the runner JSON:
+
+```json
+"lensing": {
+  "enabled": false
+}
+```
+
+When `lensing.enabled` is `false`:
+
+- The pipeline uses a fixed **identity** mass model (θ_E = 0, zero shear/multipoles) so the existing AutoLens tracer / regridding path still runs.
+- `free_lens_centre` is forced off (an explicit `free_lens_centre: true` raises an error).
+- Phase-1 mesh is forced to **`rectangular_uniform`** (Delaunay / density-adapt meshes are overridden — adaptive source meshes are not meaningful without magnification).
+- Regularization may be **`constant`** or **`adapt`**. Delaunay-only `constant_split` / `adapt_split` are remapped to `constant` / `adapt`.
+
+Missing `lensing.enabled` defaults to `true` so existing lensed runners are unchanged. Orientation keys (`flip_kinms_y_before_lensing`, etc.) are unchanged.
+
+Unlensed three-mode runners (shared mock under `data/kinms_mock_unlensed/`):
+
+| Mode | Settings |
+|------|----------|
+| parametric | `settings/runners/kinms_mock_unlensed_parametric.json` |
+| flux-from-phase1 | `settings/runners/kinms_mock_unlensed_parametric_flux.json` |
+| pixelized | `settings/runners/kinms_mock_unlensed_pixelized.json` |
+
+```bash
+# Generate / diagnose the shared unlensed mock
+python scripts/generate_unlensed_mock_and_diagnose.py
+
+# Short smoke test of all three modes (phase-1 + truth likelihood; no Dynesty)
+# Writes dirty data/model/residual plots under output/kinms_mock_unlensed_smoke/plots/
+# Regenerates the mock with Gaussian noise by default (needed for Autolens pixelizations)
+python scripts/smoke_unlensed_three_modes.py
+
+# Exact forward-model check without noise (diagnostic only)
+python scripts/smoke_unlensed_three_modes.py --no-noise
+```
+
+Per-mode plot layout:
+
+| Path | Content |
+|------|---------|
+| `plots/parametric/dirty_mom0_fit.png` | Mode 1 dirty mom0 data / model / residual |
+| `plots/parametric_flux/phase1/` | Mode 2 phase-1 dirty fit + SB map |
+| `plots/parametric_flux/phase2/dirty_mom0_fit.png` | Mode 2 kinematic dirty mom0 triplet |
+| `plots/pixelized/phase1/` | Mode 3 phase-1 dirty fit + SB map |
+| `plots/pixelized/phase2/dirty_mom0_fit.png` | Mode 3 kinematic dirty mom0 triplet |
+
 ## Phase-1 pixelized reconstruction
 
 Modes 2 and 3 run a preliminary phase-1 fit before KinMS. Phase 1 builds a **moment-0** `Interferometer` dataset (complex mean over spectral channels), reconstructs the lensed source on the source plane, and passes the SB map (and optionally lens centre / flux) to phase 2.
+
+### Image-plane grid (Nyquist default)
+
+The transformer / dirty-image grid is intentionally **coarse** (typically
+`n_pixels: 40`). Refining that grid past the interferometer resolution does
+not improve the fit: the longest baseline already sets the Nyquist limit.
+
+**Default pixel scale** (when `"pixel_scale": "nyquist"` or when UV data are
+loaded and no numeric scale is set):
+
+\[
+\Delta\theta \;=\; \tfrac{1}{2}\,\frac{\lambda}{b_{\max}}
+\;=\; \frac{0.5}{u_{\max}}\quad\text{(radians)}
+\]
+
+where \(u_{\max}=\max\sqrt{u^2+v^2}\) is taken from the loaded
+`uv_wavelengths` product (baselines in units of \(\lambda\)). The value stored
+in settings is in **arcsec**.
+
+```json
+"n_pixels": 40,
+"pixel_scale": "nyquist"
+```
+
+With that default:
+
+| Quantity | Behaviour |
+|----------|-----------|
+| `n_pixels` | Kept as set (e.g. 40²) |
+| `pixel_scale` | `0.5 × λ/b_max` in arcsec |
+| Field of view | `n_pixels × pixel_scale` (declared `real_space_width` is **overridden**) |
+
+For the `kinms_mock` ALMA UV coverage this is ≈ **0.157″/pixel** and FOV ≈
+**6.27″** (vs the older fixed `5″/40 = 0.125″`).
+
+**Overrides**
+
+| Setting | Effect |
+|---------|--------|
+| `"pixel_scale": 0.1` (numeric) | Use that arcsec scale; FOV from `real_space_width` if set |
+| `"pixel_scale_mode": "fov"` | Force legacy `real_space_width / n_pixels` even when UV is present |
+
+Phase-1 `reconstruction.mask_n_pixels` may still **oversample the same FOV**
+for the Autolens inversion (e.g. 128² over ~6″). That is separate from the
+40² transformer grid. Source morphology is controlled by the **source mesh /
+regularization**, not by refining the image-plane DFT/NUFFT grid.
+
+This is resolved automatically when UV data are loaded (`run_fit`, phase 1,
+mock generators): numeric `pixel_scale` and `real_space_width` are written
+back into the in-memory settings for the rest of the run.
 
 ### Recommended settings (interferometer mock / ALMA cubes)
 
@@ -183,8 +286,8 @@ Validated on `kinms_mock` data:
 | `mesh_type` | `"delaunay"` |
 | `image_mesh_shape` | `[30, 30]` |
 | `delaunay_edge_pixels` | `30` |
-| `regularization.type` | `"constant_split"` (Delaunay analogue of `constant`) |
-| `regularization.value` | `1e5` (fixed) or log-uniform prior around this scale |
+| `regularization.type` | `"adapt_split"` (default for Delaunay; less edge-pixel noise than `constant_split`) |
+| `regularization` | free `inner_coefficient` (log-uniform); fixed `outer_coefficient` (~30) and `signal_scale` (~3) |
 | `fix_lens` | `false` — free lens centre works well with fixed or optimised λ |
 | `search.use_jax_gradient` | `false` (Delaunay triangulation is not JAX-differentiable) |
 
@@ -209,9 +312,11 @@ Example `reconstruction` block:
   },
   "centre_prior": {"lower_limit": -0.5, "upper_limit": 0.5},
   "regularization": {
-    "type": "constant_split",
-    "prior_type": "fixed",
-    "value": 1e5
+    "type": "adapt_split",
+    "prior_type": "log_uniform",
+    "inner_coefficient": {"lower_limit": 0.01, "upper_limit": 100.0},
+    "outer_coefficient": {"prior_type": "fixed", "value": 30.0},
+    "signal_scale": {"prior_type": "fixed", "value": 3.0}
   },
   "search": {
     "path_prefix": "kinms_mock_pixelized",
@@ -219,21 +324,69 @@ Example `reconstruction` block:
     "optimizer": "LBFGS",
     "use_jax_gradient": false,
     "number_of_cores": "auto",
-    "maxiter": 1000
+    "maxiter": 1000,
+    "figure_of_merit": "log_likelihood_with_regularization"
   }
 }
 ```
 
-To optimise the regularization coefficient with LBFGS, use `"prior_type": "log_uniform"` with bounds ±3× around the tuned value (e.g. `33333`–`300000` for centre `1e5`).
+Still available: `"type": "constant_split"` with a fixed or log-uniform `coefficient` if you want uniform smoothing.
 
 ### Mesh and regularization pairing
 
 | Mesh | Regularization types |
 |------|----------------------|
-| `rectangular_adapt_density`, `rectangular_uniform` | `constant`, `adapt` |
+| `rectangular_adapt_density`, `rectangular_uniform`, `rectangular_adapt_image` | `constant`, `adapt` |
 | `delaunay` | `constant_split`, `adapt_split` |
 
-`adapt` / `adapt_split` require a dirty-image adapt map (built automatically from the dataset). `AdaptSplit` uses three parameters (`inner_coefficient`, `outer_coefficient`, `signal_scale`) on a very different scale from a single `constant`/`constant_split` coefficient (~`1e5` for interferometer data).
+`adapt` / `adapt_split` are brightness-weighted (Nightingale+2018): higher smoothing in faint pixels (`outer_coefficient`), lower in bright pixels (`inner_coefficient`), with `signal_scale` controlling the transition. They need a dirty-image adapt map (built automatically from the phase-1 dataset). Coefficient scales differ strongly from a single `constant`/`constant_split` λ (~`1e5` for interferometer data).
+
+**Lensed or unlensed:** both paths accept brightness-weighted regularization. Prefer rectangular + `adapt` when lensing is off (forced rectangular mesh). Prefer Delaunay + `adapt_split` for lensed production fits (same mesh pairing as `constant_split`).
+
+Example (unlensed rectangular + Adapt):
+
+```json
+"mesh_type": "rectangular_uniform",
+"mesh_shape": [20, 20],
+"transformer": "dft",
+"use_jax": false,
+"regularization": {
+  "type": "adapt",
+  "prior_type": "log_uniform",
+  "inner_coefficient": {"lower_limit": 0.01, "upper_limit": 100.0},
+  "outer_coefficient": {"prior_type": "fixed", "value": 50.0},
+  "signal_scale": {"prior_type": "fixed", "value": 3.0}
+}
+```
+
+Example (lensed Delaunay + AdaptSplit):
+
+```json
+"mesh_type": "delaunay",
+"image_mesh_shape": [30, 30],
+"delaunay_edge_pixels": 30,
+"regularization": {
+  "type": "adapt_split",
+  "prior_type": "log_uniform",
+  "inner_coefficient": {"lower_limit": 0.01, "upper_limit": 100.0},
+  "outer_coefficient": {"prior_type": "fixed", "value": 50.0},
+  "signal_scale": {"prior_type": "fixed", "value": 3.0}
+},
+"search": {
+  "figure_of_merit": "log_likelihood_with_regularization"
+}
+```
+
+Tuned starting point from the unlensed pixelized mock: free `inner_coefficient` near ~1, fixed `outer_coefficient=50`, `signal_scale=3`. On large UV datasets with rectangular Adapt, prefer `transformer: "dft"` over NUFFT (NUFFT + Adapt can be memory-heavy). Neither `constant`/`adapt` nor their `*_split` variants enforce non-negative source pixels — set `"use_positive_only_solver": true` under `reconstruction` for Autolens' positive-only linear solver (recommended for Adapt; default in code is still `false` if omitted).
+
+Example runners:
+
+| Case | Settings |
+|------|----------|
+| Unlensed pixelized + Adapt | `settings/runners/kinms_mock_unlensed_pixelized.json` |
+| Unlensed flux-from-phase1 + Adapt | `settings/runners/kinms_mock_unlensed_parametric_flux.json` |
+| Lensed pixelized + AdaptSplit (Delaunay) | `settings/runners/kinms_mock_lensed_pixelized_adapt.json` |
+| Lensed pixelized + `adapt_split` (Delaunay, default) | `settings/runners/kinms_mock_lensed_pixelized.json` |
 
 ### JAX gradients (`use_jax_gradient`)
 
@@ -350,14 +503,14 @@ python scripts/generate_lensed_mock_and_diagnose.py \
   --settings settings/runners/kinms_mock_lensed_pixelized_widevel.json
 ```
 
-Ceiling check: lensing the frozen source cube and dirty-imaging should give χ² ≈ 0 on a noiseless mock.
+Ceiling check: lensing the frozen source cube and dirty-imaging should give χ² ≈ 0 on a noiseless mock (`--no-noise`). Production / phase-1 mocks should keep the default noise injection.
 
 ### Lensed pixelized-SB truth diagnostics
 
 Fixes the SB map to the truth channel-mean cube, runs `KinMSPixelized` at truth kinematics, and writes source-plane + dirty residual diagnostics:
 
 ```bash
-# Generate mock (noiseless by default) + diagnose
+# Generate mock with noise (default; required for Autolens pixelizations) + diagnose
 python scripts/generate_lensed_mock_pixelized_and_diagnose.py \
   --settings settings/runners/kinms_mock_lensed_pixelized_widevel.json
 
@@ -366,10 +519,10 @@ python scripts/generate_lensed_mock_pixelized_and_diagnose.py \
   --settings settings/runners/kinms_mock_lensed_pixelized_widevel.json \
   --skip-generate
 
-# Optional: inject Gaussian visibility noise N(0, σ) from the template σ map
+# Optional: noiseless mock for exact forward-model checks only
 python scripts/generate_lensed_mock_pixelized_and_diagnose.py \
   --settings settings/runners/kinms_mock_lensed_pixelized_widevel.json \
-  --add-noise
+  --no-noise
 ```
 
 Useful outputs under `output/.../lensed_pixelized_truth_diagnostics/`:
@@ -381,7 +534,7 @@ Useful outputs under `output/.../lensed_pixelized_truth_diagnostics/`:
 | `dirty_mom0_*_over_sigma.png` | Dirty mom0 residuals in units of Monte-Carlo dirty-image σ |
 | `channel_residuals_*_over_sigma.png` | Per-channel residuals / σ (±5σ colour bar) |
 
-Visibility σ always comes from the template `sigma_statwt` (χ² weights). The mock is **noiseless** unless `--add-noise` is set. Residual `/σ` maps use a Monte-Carlo dirty-image noise cube from that same σ.
+Visibility σ always comes from the template `sigma_statwt` (χ² weights). **Mocks inject Gaussian noise by default** (`N(0, σ)`); use `--no-noise` only for exact forward-model diagnostics — Autolens pixelized source solutions struggle without a noise floor. Residual `/σ` maps use a Monte-Carlo dirty-image noise cube from that same σ.
 
 For high-\(v\sin i\) disks, set `mock_pad_channels_each_side` (widevel settings use `8`) so the spectral window is wider than the projected rotation; otherwise edge channels are truncated and pixelized SB underfills the line wings.
 

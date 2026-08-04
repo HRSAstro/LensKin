@@ -80,9 +80,20 @@
       "uv_mode": "average"
     },
     "regularization": {
-      "type": "constant_split",
-      "prior_type": "fixed",
-      "value": 100000.0
+      "type": "adapt_split",
+      "prior_type": "log_uniform",
+      "inner_coefficient": {
+        "lower_limit": 0.01,
+        "upper_limit": 100.0
+      },
+      "outer_coefficient": {
+        "prior_type": "fixed",
+        "value": 30.0
+      },
+      "signal_scale": {
+        "prior_type": "fixed",
+        "value": 3.0
+      }
     },
     "search": {
       "path_prefix": "kinms_mock_lensed_pixelized_widevel",
@@ -90,7 +101,8 @@
       "optimizer": "LBFGS",
       "use_jax_gradient": false,
       "number_of_cores": 8,
-      "maxiter": 1000
+      "maxiter": 1000,
+      "figure_of_merit": "log_likelihood_with_regularization"
     },
     "clouds_per_pixel": 1024,
     "disk_scale_height_kpc": 0.1

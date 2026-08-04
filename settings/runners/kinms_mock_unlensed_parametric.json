@@ -22,8 +22,12 @@
   "rest_line_frequency_ghz": 1036.912393,
   "model_name": "KinMS",
   "normalization_mode": "parametric",
+  "lensing": {
+    "enabled": false
+  },
   "flip_kinms_y_before_lensing": true,
   "flip_velocity_axis": false,
+  "mock_pad_channels_each_side": 4,
   "truth_parameters": {
     "z_centre": 0.0,
     "intensity": 12.5,

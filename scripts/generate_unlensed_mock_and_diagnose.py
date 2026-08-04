@@ -10,13 +10,17 @@ the truth model.
 This skips CASA entirely — residuals are then due to KinMS cloudlet sampling
 and/or injected noise, not lens ray-tracing or simobserve flux conventions.
 
+**Noise is on by default.** Autolens pixelized source reconstructions need a
+realistic noise floor; noiseless mocks make the inversion ill-behaved. Use
+``--no-noise`` only for exact forward-model diagnostics.
+
 Examples::
 
-  # Noiseless mock + truth residual plots
+  # Mock with Gaussian noise from the template sigma map (default)
   python scripts/generate_unlensed_mock_and_diagnose.py
 
-  # Add Gaussian noise from the template sigma map
-  python scripts/generate_unlensed_mock_and_diagnose.py --add-noise
+  # Noiseless mock (diagnostic only)
+  python scripts/generate_unlensed_mock_and_diagnose.py --no-noise
 
   # Skip regenerate / write if data already exist
   python scripts/generate_unlensed_mock_and_diagnose.py --skip-generate
@@ -40,12 +44,14 @@ setup(__file__)
 import matplotlib.pyplot as plt
 import numpy as np
 
+from scripts.generate_lensed_mock_and_diagnose import expand_template_spectral_axis
 from scripts.test_truth_model import _visibility_fit_stats
 from src.analysis import analysis as analysis_mod
 from src.dataset.dataset import Dataset, MaskedDataset
 from src.grid.grid import Grid3D
 from src.mask.mask import Mask3D
 from src.pipelines.cube_io import load_exported_array, write_exported_array
+from src.pipelines.lens_model import lensing_enabled, validate_lensing_settings
 from src.pipelines.pixelized_plots import save_cube, save_fit_triplet, save_image
 from src.pipelines.runner import build_tracer, load_settings
 from src.pipelines.truth_model import truth_instance_from_settings
@@ -61,7 +67,15 @@ def _stem(prefix, uid, width):
     return f"{prefix}_{uid}_width_{width}_contsub"
 
 
-def _copy_template_arrays(template_dir, out_dir, template_uid, uid, width):
+def _copy_template_arrays(
+    template_dir,
+    out_dir,
+    template_uid,
+    uid,
+    width,
+    *,
+    pad_channels_each_side: int = 0,
+):
     """Copy frequencies / uv / sigma from template; visibilities written later."""
     template_dir = Path(template_dir)
     out_dir = Path(out_dir)
@@ -76,6 +90,24 @@ def _copy_template_arrays(template_dir, out_dir, template_uid, uid, width):
         src = template_dir / _stem(prefix, template_uid, width)
         data = load_exported_array(src)
         loaded[key] = np.asarray(data)
+
+    if pad_channels_each_side:
+        loaded["frequencies"], loaded["uv_wavelengths"], loaded["sigma_statwt"] = (
+            expand_template_spectral_axis(
+                loaded["frequencies"],
+                loaded["uv_wavelengths"],
+                loaded["sigma_statwt"],
+                pad_channels_each_side=pad_channels_each_side,
+            )
+        )
+        n_chan = len(np.asarray(loaded["frequencies"]).reshape(-1))
+        z_step = spectral_utils.z_step_kms_from_data_frequencies(loaded["frequencies"])
+        print(
+            f"  padded spectral axis by ±{int(pad_channels_each_side)} channels "
+            f"-> n_chan={n_chan}, half-width≈{0.5 * n_chan * z_step:.1f} km/s"
+        )
+
+    for key, prefix in mapping.items():
         dest_base = out_dir / _stem(prefix, uid, width)
         # Drop any previous extension; write_exported_array adds .fits/.npy.
         for old in dest_base.parent.glob(dest_base.name + ".*"):
@@ -105,6 +137,7 @@ def _split_pols_for_export(model_vis):
 
 def _analysis_from_loaded(settings, frequencies, uv_wavelengths, visibilities, sigma):
     z_step_kms = spectral_utils.z_step_kms_from_data_frequencies(frequencies)
+    autolens_utils.resolve_image_plane_grid_in_settings(settings, uv_wavelengths)
     img_n, img_scale, _ = autolens_utils.image_plane_grid_from_settings(settings)
     image_grid_3d = Grid3D.uniform(
         n_pixels=img_n,
@@ -147,20 +180,47 @@ def _analysis_from_loaded(settings, frequencies, uv_wavelengths, visibilities, s
     )
 
 
-def generate_mock(settings, *, template_data, template_uid, add_noise, seed=0):
+def generate_mock(
+    settings,
+    *,
+    template_data,
+    template_uid,
+    add_noise=True,
+    seed=0,
+    pad_channels_each_side=None,
+    noise_scale=1.0,
+):
     settings = copy.deepcopy(settings)
+    validate_lensing_settings(settings)
     out_dir = Path(settings["data_directory"])
     uid = settings["uids"][0]
     width = settings["width"]
+    if pad_channels_each_side is None:
+        pad_channels_each_side = int(
+            settings.get("mock_pad_channels_each_side", 0) or 0
+        )
+    else:
+        pad_channels_each_side = int(pad_channels_each_side)
+    noise_scale = float(noise_scale)
+    if not np.isfinite(noise_scale) or noise_scale < 0.0:
+        raise ValueError(f"noise_scale must be finite and >= 0; got {noise_scale!r}")
 
     print("\n=== Generate unlensed mock visibilities ===\n")
     print(f"  template = {template_data} (uid={template_uid})")
     print(f"  output   = {out_dir} (uid={uid})")
+    print(f"  lensing.enabled = {lensing_enabled(settings)}")
     print(f"  θ_E      = {settings['lens_mass_model']['einstein_radius']}")
     print(f"  add_noise = {add_noise}")
+    print(f"  noise_scale = {noise_scale}")
+    print(f"  pad_channels_each_side = {pad_channels_each_side}")
 
     loaded = _copy_template_arrays(
-        template_data, out_dir, template_uid, uid, width
+        template_data,
+        out_dir,
+        template_uid,
+        uid,
+        width,
+        pad_channels_each_side=pad_channels_each_side,
     )
     # Build concatenated arrays as load_cube_data would.
     frequencies = loaded["frequencies"]
@@ -199,12 +259,25 @@ def generate_mock(settings, *, template_data, template_uid, add_noise, seed=0):
 
     if add_noise:
         rng = np.random.default_rng(seed)
-        noise = rng.normal(size=model_vis.shape) * sigma
+        noise = rng.normal(size=model_vis.shape) * (sigma * noise_scale)
         data_vis = model_vis + noise
-        print(f"  injected Gaussian noise (seed={seed})")
+        print(
+            f"  injected Gaussian noise (seed={seed}, amplitude={noise_scale}×σ)"
+        )
+        if noise_scale != 1.0:
+            # Keep the exported noise map consistent with the injected amplitude.
+            sigma_export = np.asarray(loaded["sigma_statwt"], dtype=float) * noise_scale
+            sig_base = out_dir / _stem("sigma_statwt", uid, width)
+            for old in sig_base.parent.glob(sig_base.name + ".*"):
+                old.unlink()
+            sig_path = write_exported_array(str(sig_base), sigma_export)
+            print(f"  rewrote noise map ×{noise_scale}: {sig_path}")
     else:
         data_vis = model_vis
-        print("  noiseless mock (data = model visibilities)")
+        print(
+            "  noiseless mock (data = model visibilities); "
+            "Autolens pixelizations typically need noise — prefer the default"
+        )
 
     export = _split_pols_for_export(data_vis)
     vis_base = out_dir / _stem("visibilities", uid, width)
@@ -226,6 +299,7 @@ def generate_mock(settings, *, template_data, template_uid, add_noise, seed=0):
         "data_vis": data_vis,
         "analysis": analysis,
         "instance": instance,
+        "noise_scale": noise_scale,
     }
 
 
@@ -362,12 +436,38 @@ def main():
         help="Existing dataprep dir providing UV / frequencies / sigma",
     )
     parser.add_argument("--template-uid", default=DEFAULT_TEMPLATE_UID)
+    parser.set_defaults(add_noise=True)
     parser.add_argument(
         "--add-noise",
         action="store_true",
-        help="Add Gaussian noise drawn from the template sigma map",
+        dest="add_noise",
+        help="Inject Gaussian noise from the template sigma map (default)",
+    )
+    parser.add_argument(
+        "--no-noise",
+        action="store_false",
+        dest="add_noise",
+        help=(
+            "Noiseless mock (data = model). Diagnostic only — Autolens "
+            "pixelized source solutions struggle without a noise floor"
+        ),
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--noise-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for injected noise (and exported σ); e.g. 1/3 for 3× quieter data",
+    )
+    parser.add_argument(
+        "--pad-channels",
+        type=int,
+        default=None,
+        help=(
+            "Extra empty channels at each end of the spectral axis "
+            "(overrides settings mock_pad_channels_each_side)"
+        ),
+    )
     parser.add_argument(
         "--skip-generate",
         action="store_true",
@@ -377,6 +477,7 @@ def main():
     args = parser.parse_args()
 
     settings = load_settings(args.settings)
+    validate_lensing_settings(settings)
     frozen = None
     if not args.skip_generate:
         result = generate_mock(
@@ -385,6 +486,8 @@ def main():
             template_uid=args.template_uid,
             add_noise=args.add_noise,
             seed=args.seed,
+            pad_channels_each_side=args.pad_channels,
+            noise_scale=args.noise_scale,
         )
         frozen = result["source_cube"]
     diagnose(settings, plots_dir=args.plots_dir, frozen_cube=frozen)

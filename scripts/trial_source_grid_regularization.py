@@ -76,6 +76,7 @@ from src.pipelines.pixelized_plots import save_fit_triplet, save_image
 from src.pipelines.reconstruction import (
     reconstruction_mask_from_settings,
     source_sb_from_fit,
+    use_positive_only_solver_from_settings,
 )
 from src.pipelines.runner import load_cube_data, load_settings
 from src.pipelines.truth_model import truth_instance_from_settings
@@ -184,7 +185,9 @@ def run_phase1_fit(settings, *, regularization_coefficient, output_dir=None):
         dataset=dataset,
         tracer=tracer,
         adapt_images=adapt_images,
-        settings=al.Settings(use_positive_only_solver=False),
+        settings=al.Settings(
+            use_positive_only_solver=use_positive_only_solver_from_settings(settings)
+        ),
     )
     breakdown = phase1_likelihood_breakdown(fit)
     if output_dir is not None:

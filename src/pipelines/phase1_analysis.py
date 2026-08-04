@@ -67,7 +67,15 @@ class Phase1AnalysisInterferometer(al.AnalysisInterferometer):
         except (af.exc.FitException, np.linalg.LinAlgError):
             raise af.exc.FitException from None
 
-        if figure_of_merit is None or np.isnan(figure_of_merit):
+        if figure_of_merit is None:
             raise af.exc.FitException
+
+        # ``np.isnan`` calls ``__array__`` and fails under Autofit JAX jit
+        # (TracerArrayConversionError). Skip the concrete NaN check for tracers.
+        try:
+            if np.isnan(figure_of_merit):
+                raise af.exc.FitException
+        except TypeError:
+            pass
 
         return figure_of_merit - log_likelihood_penalty

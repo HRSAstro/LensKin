@@ -1,0 +1,57 @@
+{
+  "modes": {
+    "parametric": {
+      "mode": "parametric",
+      "mesh_type": null,
+      "ok": true,
+      "chi_squared_per_datum": 0.9989445232904703,
+      "log_likelihood": 4695238.382198621,
+      "plots": {
+        "dirty_mom0_fit": "output/kinms_mock_unlensed_smoke/plots/parametric/dirty_mom0_fit.png",
+        "channel_residuals": "output/kinms_mock_unlensed_smoke/plots/parametric/channel_residuals.png"
+      }
+    },
+    "parametric_flux": {
+      "mode": "parametric_flux_from_phase1",
+      "mesh_type": "rectangular_uniform",
+      "ok": true,
+      "phase1_sb_sum": 0.019822609006002592,
+      "lens_centre": [
+        0.0,
+        0.0
+      ],
+      "chi_squared_per_datum": 0.9991030341348185,
+      "log_likelihood": 4694958.76906919,
+      "plots": {
+        "phase1": "output/kinms_mock_unlensed_smoke/plots/parametric_flux/phase1/fit_triplet.png",
+        "phase1_sb_map": "output/kinms_mock_unlensed_smoke/plots/parametric_flux/phase1/sb_map.png",
+        "phase2_dirty_mom0_fit": "output/kinms_mock_unlensed_smoke/plots/parametric_flux/phase2/dirty_mom0_fit.png",
+        "phase2_channel_residuals": "output/kinms_mock_unlensed_smoke/plots/parametric_flux/phase2/channel_residuals.png"
+      }
+    },
+    "pixelized": {
+      "mode": "pixelized",
+      "mesh_type": "rectangular_uniform",
+      "ok": true,
+      "phase1_sb_sum": 0.019831561928253784,
+      "lens_centre": [
+        0.0,
+        0.0
+      ],
+      "chi_squared_per_datum": 0.9995651595063083,
+      "log_likelihood": 4694143.579913883,
+      "plots": {
+        "phase1": "output/kinms_mock_unlensed_smoke/plots/pixelized/phase1/fit_triplet.png",
+        "phase1_sb_map": "output/kinms_mock_unlensed_smoke/plots/pixelized/phase1/sb_map.png",
+        "phase2_dirty_mom0_fit": "output/kinms_mock_unlensed_smoke/plots/pixelized/phase2/dirty_mom0_fit.png",
+        "phase2_channel_residuals": "output/kinms_mock_unlensed_smoke/plots/pixelized/phase2/channel_residuals.png"
+      }
+    }
+  },
+  "lensing_enabled": false,
+  "add_noise": false,
+  "seed": null,
+  "noise_scale": null,
+  "pad_channels_each_side": null,
+  "plots_dir": "output/kinms_mock_unlensed_smoke/plots"
+}

@@ -5,7 +5,11 @@ import numpy as np
 from astropy import units
 from scipy.interpolate import griddata
 
-from src.pipelines.lens_model import lens_galaxy_model_from_settings
+from src.pipelines.lens_model import (
+    apply_lensing_off_reconstruction_overrides,
+    lens_galaxy_model_from_settings,
+    lensing_enabled,
+)
 from src.pipelines.moment0_noise import (
     moment0_arrays_from,
     moment0_settings_from_reconstruction,
@@ -79,9 +83,12 @@ def moment0_dataset_from(
 
 def _build_lens_model(settings):
     rec_cfg = settings["reconstruction"]
+    free_centre = False if not lensing_enabled(settings) else not rec_cfg.get(
+        "fix_lens", False
+    )
     return lens_galaxy_model_from_settings(
         settings,
-        free_centre=not rec_cfg.get("fix_lens", False),
+        free_centre=free_centre,
         centre_prior_cfg=rec_cfg.get("centre_prior"),
     )
 
@@ -91,17 +98,24 @@ _REGULARIZATION_CLASSES = {
     "constant_split": al.reg.ConstantSplit,
     "adapt": al.reg.Adapt,
     "adapt_split": al.reg.AdaptSplit,
+    "adapt_split_zeroth": al.reg.AdaptSplitZeroth,
 }
 
-_ADAPT_REGULARIZATION_TYPES = frozenset({"adapt", "adapt_split"})
+_ADAPT_REGULARIZATION_TYPES = frozenset({"adapt", "adapt_split", "adapt_split_zeroth"})
 
-_DELAUNAY_ONLY_REGULARIZATION_TYPES = frozenset({"constant_split", "adapt_split"})
+_ADAPT_ZEROTH_REGULARIZATION_TYPES = frozenset({"adapt_split_zeroth"})
+
+_DELAUNAY_ONLY_REGULARIZATION_TYPES = frozenset(
+    {"constant_split", "adapt_split", "adapt_split_zeroth"}
+)
 
 _DEFAULT_REGULARIZATION_TYPE_BY_MESH = {
     "rectangular_adapt_density": "constant",
     "rectangular_uniform": "constant",
     "rectangular_adapt_image": "constant",
-    "delaunay": "constant_split",
+    # Prefer brightness-weighted AdaptSplit on Delaunay: less prone to rogue
+    # edge pixels than ConstantSplit at likelihood-optimal λ.
+    "delaunay": "adapt_split",
 }
 
 
@@ -118,10 +132,23 @@ def regularization_needs_adapt_image(reg_type):
     return reg_type in _ADAPT_REGULARIZATION_TYPES
 
 
+def use_positive_only_solver_from_settings(settings, default=False):
+    """
+    Whether phase-1 inversions use Autolens' positive-only linear solver.
+
+    Read from ``reconstruction.use_positive_only_solver``. Default ``False``
+    matches historical LensKin behaviour (source pixels may go negative).
+    Regularization type does not imply positivity — this flag does.
+    """
+    rec_cfg = settings.get("reconstruction", {}) if settings is not None else {}
+    return bool(rec_cfg.get("use_positive_only_solver", default))
+
+
 def validate_mesh_regularization_pair(mesh_type, reg_type):
     """
-    ``ConstantSplit`` / ``AdaptSplit`` use cross-derivative regularization that
-    requires a Delaunay interpolator (``_mappings_sizes_weights_split``).
+    ``ConstantSplit`` / ``AdaptSplit`` / ``AdaptSplitZeroth`` use cross-derivative
+    regularization that requires a Delaunay interpolator
+    (``_mappings_sizes_weights_split``).
     """
     if reg_type in _DELAUNAY_ONLY_REGULARIZATION_TYPES and mesh_type != "delaunay":
         raise ValueError(
@@ -196,27 +223,27 @@ def _regularization_coefficient_from_settings(reg_cfg):
     )
 
 
-def _signal_scale_prior_from_settings(reg_cfg):
+def _signal_scale_prior_from_settings(reg_cfg, param_name="signal_scale", default=3.0):
     prior_type = reg_cfg.get("prior_type", "log_uniform")
-    param_cfg = reg_cfg.get("signal_scale")
+    param_cfg = reg_cfg.get(param_name)
     if isinstance(param_cfg, dict):
         if param_cfg.get("prior_type") == "fixed" or "value" in param_cfg:
-            return float(param_cfg.get("value", 3.0))
+            return float(param_cfg.get("value", default))
         return af.UniformPrior(
             lower_limit=param_cfg.get("lower_limit", 0.0),
             upper_limit=param_cfg.get("upper_limit", 10.0),
         )
     if prior_type == "fixed":
-        return float(reg_cfg.get("signal_scale", 3.0))
+        return float(reg_cfg.get(param_name, default))
     return af.UniformPrior(
-        lower_limit=reg_cfg.get("signal_scale_lower_limit", 0.0),
-        upper_limit=reg_cfg.get("signal_scale_upper_limit", 10.0),
+        lower_limit=reg_cfg.get(f"{param_name}_lower_limit", 0.0),
+        upper_limit=reg_cfg.get(f"{param_name}_upper_limit", 10.0),
     )
 
 
-def _adapt_regularization_priors_from_settings(reg_cfg):
-    """Priors for ``Adapt`` / ``AdaptSplit`` (tutorial 11 / SLaM defaults)."""
-    return {
+def _adapt_regularization_priors_from_settings(reg_cfg, reg_type="adapt"):
+    """Priors for ``Adapt`` / ``AdaptSplit`` / ``AdaptSplitZeroth``."""
+    priors = {
         "inner_coefficient": _scalar_prior_from_settings(
             reg_cfg,
             param_name="inner_coefficient",
@@ -229,6 +256,16 @@ def _adapt_regularization_priors_from_settings(reg_cfg):
         ),
         "signal_scale": _signal_scale_prior_from_settings(reg_cfg),
     }
+    if reg_type in _ADAPT_ZEROTH_REGULARIZATION_TYPES:
+        priors["zeroth_coefficient"] = _scalar_prior_from_settings(
+            reg_cfg,
+            param_name="zeroth_coefficient",
+            defaults={"fixed": 1.0, "lower": 1e-6, "upper": 1e6},
+        )
+        priors["zeroth_signal_scale"] = _signal_scale_prior_from_settings(
+            reg_cfg, param_name="zeroth_signal_scale", default=1.0
+        )
+    return priors
 
 
 def _regularization_scalar_from_config(reg_cfg, param_name, default):
@@ -260,6 +297,13 @@ def fixed_regularization_values_from_settings(reg_cfg, reg_type, overrides=None)
                 reg_cfg, "signal_scale", 3.0
             ),
         }
+        if reg_type in _ADAPT_ZEROTH_REGULARIZATION_TYPES:
+            values["zeroth_coefficient"] = _regularization_scalar_from_config(
+                reg_cfg, "zeroth_coefficient", 1.0
+            )
+            values["zeroth_signal_scale"] = _regularization_scalar_from_config(
+                reg_cfg, "zeroth_signal_scale", 1.0
+            )
     else:
         values = {
             "coefficient": _regularization_scalar_from_config(
@@ -282,12 +326,20 @@ def format_regularization_config(reg_cfg, reg_type):
         )
 
     if reg_type in _ADAPT_REGULARIZATION_TYPES:
-        parts = []
-        for param_name, default in (
+        param_defaults = [
             ("inner_coefficient", 0.005),
             ("outer_coefficient", 1.9),
             ("signal_scale", 3.0),
-        ):
+        ]
+        if reg_type in _ADAPT_ZEROTH_REGULARIZATION_TYPES:
+            param_defaults.extend(
+                [
+                    ("zeroth_coefficient", 1.0),
+                    ("zeroth_signal_scale", 1.0),
+                ]
+            )
+        parts = []
+        for param_name, default in param_defaults:
             param = reg_cfg.get(param_name, default)
             if isinstance(param, dict):
                 if param.get("prior_type") == "fixed" or "value" in param:
@@ -320,11 +372,17 @@ def format_regularization_config(reg_cfg, reg_type):
 def format_regularization_values(reg_type, values):
     """Human-readable summary of regularization parameters in use."""
     if reg_type in _ADAPT_REGULARIZATION_TYPES:
-        return (
+        text = (
             f"inner_coefficient={values['inner_coefficient']}, "
             f"outer_coefficient={values['outer_coefficient']}, "
             f"signal_scale={values['signal_scale']}"
         )
+        if reg_type in _ADAPT_ZEROTH_REGULARIZATION_TYPES:
+            text += (
+                f", zeroth_coefficient={values['zeroth_coefficient']}, "
+                f"zeroth_signal_scale={values['zeroth_signal_scale']}"
+            )
+        return text
     return f"coefficient={values['coefficient']}"
 
 
@@ -339,7 +397,9 @@ def _build_regularization_model(reg_cfg, reg_type):
 
     regularization = af.Model(reg_cls)
     if reg_type in _ADAPT_REGULARIZATION_TYPES:
-        for param_name, prior in _adapt_regularization_priors_from_settings(reg_cfg).items():
+        for param_name, prior in _adapt_regularization_priors_from_settings(
+            reg_cfg, reg_type=reg_type
+        ).items():
             setattr(regularization, param_name, prior)
     else:
         regularization.coefficient = _regularization_coefficient_from_settings(reg_cfg)
@@ -347,6 +407,7 @@ def _build_regularization_model(reg_cfg, reg_type):
 
 
 def build_reconstruction_model(settings, mask_2d):
+    apply_lensing_off_reconstruction_overrides(settings)
     rec_cfg = settings["reconstruction"]
     mesh_type = rec_cfg.get("mesh_type", "rectangular_adapt_density")
     reg_cfg = rec_cfg.get("regularization", {})
@@ -375,13 +436,17 @@ _MESH_MODEL_CLASSES = {
 }
 
 def reconstruction_mask_from_settings(settings):
+    """
+    Circular mask for phase-1 Autolens interferometer imaging.
+
+    Field of view follows the **image-plane** ``real_space_width`` (Nyquist-
+    resolved when applicable). ``mask_n_pixels`` may oversample that FOV for
+    the inversion; it does not change the transformer image-plane grid.
+    """
     rec_cfg = settings["reconstruction"]
-    n_pixels, pixel_scale, real_space_width = autolens_utils.source_grid_from_settings(
-        settings
-    )
-    mask_n_pixels = rec_cfg.get("mask_n_pixels", n_pixels)
-    if mask_n_pixels != n_pixels:
-        pixel_scale = real_space_width / mask_n_pixels
+    _, _, real_space_width = autolens_utils.image_plane_grid_from_settings(settings)
+    mask_n_pixels = int(rec_cfg.get("mask_n_pixels", settings["n_pixels"]))
+    pixel_scale = real_space_width / mask_n_pixels
 
     mask_radius = rec_cfg.get("mask_radius", real_space_width / 2.0)
 
@@ -493,8 +558,9 @@ def adapt_images_for_reconstruction(settings, mask_2d, dataset=None):
 
     - ``delaunay``: requires the precomputed image-plane mesh grid.
     - ``rectangular_adapt_image``: dirty-image adapt map for mesh weighting.
-    - ``adapt`` / ``adapt_split``: dirty-image adapt map for spatially varying
-      regularization (PyAutoLens tutorial 11 / SLaM ``source_pix`` stage 2).
+    - ``adapt`` / ``adapt_split`` / ``adapt_split_zeroth``: dirty-image adapt map
+      for spatially varying regularization (PyAutoLens tutorial 11 / SLaM
+      ``source_pix`` stage 2).
     """
     rec_cfg = settings["reconstruction"]
     mesh_type = rec_cfg.get("mesh_type", "rectangular_adapt_density")
@@ -615,6 +681,9 @@ def print_phase1_setup(settings, mask_2d, model, dataset=None, transformer_class
     )
     print(f"  transformer              = {getattr(transformer_class, '__name__', transformer_class)}")
     print(f"  use_jax (requested)      = {rec_cfg.get('use_jax', True)}")
+    print(
+        f"  use_positive_only_solver  = {rec_cfg.get('use_positive_only_solver', False)}"
+    )
     print(f"  mesh_type                = {mesh_type}")
     if mesh_type == "delaunay":
         print(
@@ -790,12 +859,24 @@ def print_phase1_result(instance, fit, settings=None):
 def run_reconstruction(settings):
     from src.pipelines.runner import load_cube_data, load_cube_data_weights
 
+    apply_lensing_off_reconstruction_overrides(settings)
+
     af.conf.instance.push(
         new_path=settings.get("config_path", "./config"),
         output_path=settings["output_path"],
     )
 
     frequencies, uv_wavelengths, visibilities, sigma = load_cube_data(settings)
+    n_pix, pix_scale, fov = autolens_utils.resolve_image_plane_grid_in_settings(
+        settings, uv_wavelengths
+    )
+    logger.info(
+        "Image-plane grid: %s², pixel_scale=%.5f arcsec, FOV=%.4f arcsec "
+        "(Nyquist 0.5 λ/b_max when pixel_scale is auto/nyquist)",
+        n_pix,
+        pix_scale,
+        fov,
+    )
     mask_2d = reconstruction_mask_from_settings(settings)
     rec_cfg = settings["reconstruction"]
     mesh_type = rec_cfg.get("mesh_type", "rectangular_adapt_density")
@@ -895,10 +976,13 @@ def run_reconstruction(settings):
     )
     logger.info("Phase-1 optimizer figure_of_merit: %s", figure_of_merit)
 
+    use_positive_only_solver = use_positive_only_solver_from_settings(settings)
+    logger.info("Phase-1 use_positive_only_solver: %s", use_positive_only_solver)
+
     analysis = Phase1AnalysisInterferometer(
         dataset=dataset,
         adapt_images=adapt_images,
-        settings=al.Settings(use_positive_only_solver=False),
+        settings=al.Settings(use_positive_only_solver=use_positive_only_solver),
         raise_inversion_positions_likelihood_exception=False,
         use_jax=use_jax,
         figure_of_merit=figure_of_merit,
@@ -1002,18 +1086,37 @@ def phase2_source_grid_from_result(result, n_channels, settings=None):
     )
 
 
-def source_sb_from_fit(fit, grid_2d):
+def interpolate_reconstruction_to_grid(
+    reconstruction,
+    source_plane_mesh_grid,
+    grid_2d,
+):
     """
-    Interpolate a ``FitInterferometer`` source reconstruction onto ``grid_2d``.
+    Interpolate an inversion reconstruction onto a regular ``grid_2d``.
 
-    Preserves ``sum(reconstruction)`` after interpolation onto the regular grid.
+    Autolens source-pixel values are treated as **surface brightness in the
+    same Jy/pixel units as the interferometer image grid** (not as integrated
+    flux per mesh cell). Linear interpolation onto a finer regular grid must
+    **not** force ``sum(sb_map) == sum(reconstruction)``: for a uniform mesh
+    covering the same area as an ``N``-times finer grid, the sum grows by
+    about ``N²`` because each destination pixel carries Jy in that smaller
+    pixel. Preserving the sum erased that area factor (~4 for 20²→40²) and
+    under-fed KinMS ``intFlux`` by the same amount.
     """
-    inversion = fit.inversion
-    mapper = inversion.cls_list_from(cls=al.Mapper)[0]
+    reconstruction = np.asarray(reconstruction, dtype=float).ravel()
+    source_plane_mesh_grid = np.asarray(source_plane_mesh_grid, dtype=float)
+    interpolation_coords = np.asarray(grid_2d, dtype=float)
 
-    reconstruction = _to_numpy(inversion.reconstruction)
-    source_plane_mesh_grid = _to_numpy(mapper.source_plane_mesh_grid)
-    interpolation_coords = _to_numpy(grid_2d)
+    if source_plane_mesh_grid.ndim != 2 or source_plane_mesh_grid.shape[1] != 2:
+        raise ValueError(
+            "source_plane_mesh_grid must have shape (n_mesh, 2); "
+            f"got {source_plane_mesh_grid.shape}"
+        )
+    if reconstruction.shape[0] != source_plane_mesh_grid.shape[0]:
+        raise ValueError(
+            "reconstruction length must match mesh points: "
+            f"{reconstruction.shape[0]} vs {source_plane_mesh_grid.shape[0]}"
+        )
 
     interpolated = griddata(
         points=source_plane_mesh_grid,
@@ -1021,18 +1124,24 @@ def source_sb_from_fit(fit, grid_2d):
         xi=interpolation_coords,
         fill_value=0.0,
     )
+    return np.asarray(interpolated.reshape(grid_2d.shape_native), dtype=float)
 
-    shape_2d = grid_2d.shape_native
-    sb_map = interpolated.reshape(shape_2d)
 
-    # Enforce flux conservation between the original inversion grid and the
-    # regular grid by matching the total reconstructed flux.
-    total_original = float(reconstruction.sum())
-    total_interpolated = float(sb_map.sum())
-    if total_interpolated > 0.0:
-        sb_map *= total_original / total_interpolated
+def source_sb_from_fit(fit, grid_2d):
+    """
+    Interpolate a ``FitInterferometer`` source reconstruction onto ``grid_2d``.
 
-    return np.asarray(sb_map, dtype=float)
+    Returns a map in Jy/pixel (per channel) on ``grid_2d``. See
+    :func:`interpolate_reconstruction_to_grid` for flux / area conventions.
+    """
+    inversion = fit.inversion
+    mapper = inversion.cls_list_from(cls=al.Mapper)[0]
+
+    return interpolate_reconstruction_to_grid(
+        reconstruction=_to_numpy(inversion.reconstruction),
+        source_plane_mesh_grid=_to_numpy(mapper.source_plane_mesh_grid),
+        grid_2d=grid_2d,
+    )
 
 
 def source_sb_on_grid(result, grid_2d):

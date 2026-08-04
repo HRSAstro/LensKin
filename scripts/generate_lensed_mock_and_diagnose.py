@@ -10,13 +10,17 @@ truth model.
 This skips CASA entirely — same pipeline as generate_unlensed_mock_and_diagnose.py
 but with a non-zero Einstein radius / shear (full lensing step).
 
+**Noise is on by default.** Autolens pixelized source reconstructions need a
+realistic noise floor; noiseless mocks make the inversion ill-behaved. Use
+``--no-noise`` only for exact forward-model diagnostics.
+
 Examples::
 
-  # Noiseless mock + truth residual plots
+  # Mock with Gaussian noise from the template sigma map (default)
   python scripts/generate_lensed_mock_and_diagnose.py
 
-  # Add Gaussian noise from the template sigma map
-  python scripts/generate_lensed_mock_and_diagnose.py --add-noise
+  # Noiseless mock (diagnostic only)
+  python scripts/generate_lensed_mock_and_diagnose.py --no-noise
 
   # Skip regenerate / write if data already exist
   python scripts/generate_lensed_mock_and_diagnose.py --skip-generate
@@ -204,6 +208,7 @@ def _split_pols_for_export(model_vis):
 
 def _analysis_from_loaded(settings, frequencies, uv_wavelengths, visibilities, sigma):
     z_step_kms = spectral_utils.z_step_kms_from_data_frequencies(frequencies)
+    autolens_utils.resolve_image_plane_grid_in_settings(settings, uv_wavelengths)
     img_n, img_scale, _ = autolens_utils.image_plane_grid_from_settings(settings)
     image_grid_3d = Grid3D.uniform(
         n_pixels=img_n,
@@ -246,7 +251,7 @@ def _analysis_from_loaded(settings, frequencies, uv_wavelengths, visibilities, s
     )
 
 
-def generate_mock(settings, *, template_data, template_uid, add_noise, seed=0):
+def generate_mock(settings, *, template_data, template_uid, add_noise=True, seed=0):
     settings = copy.deepcopy(settings)
     out_dir = Path(settings["data_directory"])
     uid = settings["uids"][0]
@@ -309,7 +314,10 @@ def generate_mock(settings, *, template_data, template_uid, add_noise, seed=0):
         print(f"  injected Gaussian noise (seed={seed})")
     else:
         data_vis = model_vis
-        print("  noiseless mock (data = model visibilities)")
+        print(
+            "  noiseless mock (data = model visibilities); "
+            "Autolens pixelizations typically need noise — prefer the default"
+        )
 
     export = _split_pols_for_export(data_vis)
     vis_base = out_dir / _stem("visibilities", uid, width)
@@ -467,10 +475,21 @@ def main():
         help="Existing dataprep dir providing UV / frequencies / sigma",
     )
     parser.add_argument("--template-uid", default=DEFAULT_TEMPLATE_UID)
+    parser.set_defaults(add_noise=True)
     parser.add_argument(
         "--add-noise",
         action="store_true",
-        help="Add Gaussian noise drawn from the template sigma map",
+        dest="add_noise",
+        help="Inject Gaussian noise from the template sigma map (default)",
+    )
+    parser.add_argument(
+        "--no-noise",
+        action="store_false",
+        dest="add_noise",
+        help=(
+            "Noiseless mock (data = model). Diagnostic only — Autolens "
+            "pixelized source solutions struggle without a noise floor"
+        ),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(

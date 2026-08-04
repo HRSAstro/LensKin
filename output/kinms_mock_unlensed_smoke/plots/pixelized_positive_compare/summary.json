@@ -1,0 +1,20 @@
+{
+  "positive_off": {
+    "use_positive_only_solver": false,
+    "sb_min": -6.506711257055676e-05,
+    "sb_max": 0.0002863331760495444,
+    "sb_sum": 0.01983172940491113,
+    "frac_negative": 0.4,
+    "chi_squared": 146390.7859541491,
+    "plots": "/Users/hstacey/packages/LensKin/output/kinms_mock_unlensed_smoke/plots/pixelized_positive_compare/positive_off"
+  },
+  "positive_on": {
+    "use_positive_only_solver": true,
+    "sb_min": 0.0,
+    "sb_max": 0.0002830447645253296,
+    "sb_sum": 0.022354885727902073,
+    "frac_negative": 0.0,
+    "chi_squared": 146592.9629273144,
+    "plots": "/Users/hstacey/packages/LensKin/output/kinms_mock_unlensed_smoke/plots/pixelized_positive_compare/positive_on"
+  }
+}

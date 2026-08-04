@@ -36,7 +36,10 @@ from src.pipelines.phase1_test import (
     interferometer_dataset_from_settings,
     pixelization_from_settings,
 )
-from src.pipelines.reconstruction import reconstruction_mask_from_settings
+from src.pipelines.reconstruction import (
+    reconstruction_mask_from_settings,
+    use_positive_only_solver_from_settings,
+)
 from src.pipelines.runner import load_settings
 
 ROOT = setup(__file__)
@@ -87,7 +90,9 @@ def _build_fit(settings, regularization_coefficient, use_jax=True):
         dataset=dataset,
         tracer=tracer,
         adapt_images=adapt_images,
-        settings=al.Settings(use_positive_only_solver=False),
+        settings=al.Settings(
+            use_positive_only_solver=use_positive_only_solver_from_settings(settings)
+        ),
     )
 
 

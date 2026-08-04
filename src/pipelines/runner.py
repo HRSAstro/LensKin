@@ -24,6 +24,8 @@ from src.pipelines.lens_model import (
     free_lens_centre_from_settings,
     lens_centre_from_instance,
     lens_galaxy_model_from_settings,
+    mass_model_for_settings,
+    validate_lensing_settings,
 )
 from src.pipelines.priors import source_model_from_profile
 from src.pipelines.search import build_search_from_settings
@@ -105,7 +107,7 @@ def load_cube_data_weights(settings):
 
 
 def build_tracer(settings, centre=None):
-    mass_cfg = settings["lens_mass_model"]
+    mass_cfg = mass_model_for_settings(settings)
     if centre is None:
         centre_0 = mass_cfg["centre_0"]
         centre_1 = mass_cfg["centre_1"]
@@ -187,6 +189,7 @@ def parametric_model_from_settings(settings, profile):
 
 
 def run_from_settings(settings):
+    validate_lensing_settings(settings)
     mode = validate_normalization_settings(settings)
     if requires_phase1(mode):
         raise ValueError(
@@ -197,6 +200,7 @@ def run_from_settings(settings):
     af.conf.instance.push(new_path=settings.get("config_path", "./config"), output_path=settings["output_path"])
 
     frequencies, uv_wavelengths, visibilities, sigma = load_cube_data(settings)
+    autolens_utils.resolve_image_plane_grid_in_settings(settings, uv_wavelengths)
 
     img_n_pixels, img_pixel_scale, _ = autolens_utils.image_plane_grid_from_settings(
         settings

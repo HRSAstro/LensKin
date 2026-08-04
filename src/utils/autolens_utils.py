@@ -16,6 +16,39 @@ from src.mask.mask import (
     Mask3D,
 )
 
+# Radians → arcsec (IAU exact: 180/π * 3600).
+_RADIANS_TO_ARCSEC = 180.0 / np.pi * 3600.0
+
+
+def max_uv_distance_wavelengths(uv_wavelengths):
+    """
+    Longest projected baseline in the UV array, in wavelengths.
+
+    ``uv_wavelengths`` has shape ``(..., 2)`` with ``(u, v)`` in units of
+    baseline / λ (as exported by dataprep).
+    """
+    uv = np.asarray(uv_wavelengths, dtype=float)
+    if uv.ndim < 1 or uv.shape[-1] != 2:
+        raise ValueError(
+            f"Expected uv_wavelengths with last axis length 2; got shape {uv.shape}"
+        )
+    return float(np.nanmax(np.hypot(uv[..., 0], uv[..., 1])))
+
+
+def nyquist_pixel_scale_arcsec_from_uv(uv_wavelengths):
+    """
+    Image-plane pixel scale that Nyquist-samples the longest baseline.
+
+    ``Δθ = 0.5 * λ / b_max`` (radians), with ``b_max / λ = max√(u²+v²)``.
+    Returned in arcsec.
+    """
+    uv_max = max_uv_distance_wavelengths(uv_wavelengths)
+    if not np.isfinite(uv_max) or uv_max <= 0.0:
+        raise ValueError(
+            f"Cannot derive Nyquist pixel scale: max UV distance is {uv_max}"
+        )
+    return (0.5 / uv_max) * _RADIANS_TO_ARCSEC
+
 
 def source_grid_bounding_box_from_cfg(source_cfg):
     """
@@ -149,21 +182,89 @@ def source_grid_label_from_settings(settings, phase1_result=None):
     return f"{n_pixels}² ({width}″ field, {pixel_scale:.4g}″/pix)"
 
 
-def image_plane_grid_from_settings(settings):
+def image_plane_grid_from_settings(settings, uv_wavelengths=None):
     """
     Image-plane grid for transformers, lensing evaluation, and dirty images.
 
-    Always uses top-level ``n_pixels`` / ``real_space_width`` (not
-    ``source_grid`` overrides).
+    Always uses top-level ``n_pixels`` (not ``source_grid``). Pixel scale:
+
+    - Numeric ``pixel_scale``: use that value (arcsec).
+    - ``pixel_scale: "nyquist"`` / ``"auto"``, or omitted when UV is provided
+      (default): Nyquist sampling ``0.5 * λ/b_max`` from the longest baseline.
+      Field of view is then ``n_pixels * pixel_scale`` (keeps the coarse
+      ``n_pixels`` grid, e.g. 40²).
+    - Omitted with no UV: ``real_space_width / n_pixels`` (legacy).
+
+    Override the Nyquist default with ``"pixel_scale_mode": "fov"`` to force
+    ``real_space_width / n_pixels`` even when UV is available.
     """
-    n_pixels = settings["n_pixels"]
-    real_space_width = settings["real_space_width"]
-    pixel_scale = settings.get("pixel_scale", real_space_width / n_pixels)
-    return n_pixels, pixel_scale, real_space_width
+    n_pixels = int(settings["n_pixels"])
+    explicit = settings.get("pixel_scale", None)
+    width = settings.get("real_space_width", None)
+    mode = settings.get("pixel_scale_mode", None)
+
+    if isinstance(explicit, (int, float)):
+        pixel_scale = float(explicit)
+        if width is None:
+            width = n_pixels * pixel_scale
+        else:
+            width = float(width)
+        return n_pixels, pixel_scale, width
+
+    want_nyquist = False
+    if isinstance(explicit, str) and explicit.lower() in {"nyquist", "auto"}:
+        want_nyquist = True
+    elif mode is not None:
+        want_nyquist = str(mode).lower() in {"nyquist", "auto"}
+    elif explicit is None and uv_wavelengths is not None:
+        # Default: Nyquist from UV when baselines are available.
+        want_nyquist = str(mode or "nyquist").lower() in {"nyquist", "auto"}
+
+    if mode is not None and str(mode).lower() in {"fov", "width", "real_space_width"}:
+        want_nyquist = False
+
+    if want_nyquist:
+        if uv_wavelengths is None:
+            raise ValueError(
+                "Nyquist image-plane pixel_scale requires uv_wavelengths "
+                "(or set a numeric pixel_scale / pixel_scale_mode='fov')."
+            )
+        pixel_scale = nyquist_pixel_scale_arcsec_from_uv(uv_wavelengths)
+        # Keep n_pixels fixed (coarse DFT/NUFFT grid); FOV follows Nyquist.
+        width = n_pixels * pixel_scale
+        return n_pixels, pixel_scale, width
+
+    if width is None:
+        raise ValueError(
+            "settings must provide real_space_width, a numeric pixel_scale, "
+            "or uv_wavelengths for Nyquist sampling."
+        )
+    width = float(width)
+    pixel_scale = width / n_pixels
+    return n_pixels, pixel_scale, width
 
 
-def image_plane_mask_from_settings(settings):
-    n_pixels, pixel_scale, _ = image_plane_grid_from_settings(settings)
+def resolve_image_plane_grid_in_settings(settings, uv_wavelengths):
+    """
+    Resolve Nyquist / FOV image-plane scale into concrete numeric settings.
+
+    Mutates ``settings`` in place so mask construction, plots, and KinMS FOV
+    helpers that read ``real_space_width`` / ``pixel_scale`` stay consistent.
+    Returns ``(n_pixels, pixel_scale, real_space_width)``.
+    """
+    n_pixels, pixel_scale, width = image_plane_grid_from_settings(
+        settings, uv_wavelengths=uv_wavelengths
+    )
+    settings["n_pixels"] = int(n_pixels)
+    settings["pixel_scale"] = float(pixel_scale)
+    settings["real_space_width"] = float(width)
+    return n_pixels, pixel_scale, width
+
+
+def image_plane_mask_from_settings(settings, uv_wavelengths=None):
+    n_pixels, pixel_scale, _ = image_plane_grid_from_settings(
+        settings, uv_wavelengths=uv_wavelengths
+    )
     return al.Mask2D.all_false(
         shape_native=(n_pixels, n_pixels),
         pixel_scales=pixel_scale,
@@ -447,6 +548,76 @@ def dirty_noise_cube_from(
         else:
             acc += dirty**2
     return np.sqrt(acc / float(n_realizations))
+
+
+def _visibility_sigma_re_im(noise_map):
+    """
+    Extract real/imag visibility σ from an Autolens noise map or ndarray.
+
+    ``VisibilitiesNoiseMap`` stores ``σ_re + 1j σ_im``. A float array of shape
+    ``(n_vis, 2)`` is also accepted.
+    """
+    sigma = np.asarray(noise_map)
+    if np.iscomplexobj(sigma):
+        return np.real(sigma).astype(float), np.imag(sigma).astype(float)
+    sigma = np.asarray(sigma, dtype=float)
+    if sigma.ndim == 2 and sigma.shape[-1] == 2:
+        return sigma[..., 0], sigma[..., 1]
+    if sigma.ndim == 1:
+        return sigma, sigma
+    raise ValueError(
+        f"Unsupported visibility noise_map shape {sigma.shape} / dtype {sigma.dtype}"
+    )
+
+
+def dirty_noise_map_mc_from(
+    noise_map,
+    transformer,
+    *,
+    n_realizations: int = 8,
+    seed: int = 0,
+):
+    """
+    Monte-Carlo RMS dirty image from a single-channel visibility noise map.
+
+    Prefer this over ``FitInterferometer.dirty_noise_map``, which is only the
+    inverse Fourier transform of the noise-map values (can be negative / zero)
+    and is **not** an image-plane RMS.
+
+    Pixels outside the transformer's real-space mask are left at 0 (no
+    coverage); callers should treat non-positive values as invalid when
+    forming residual / σ maps.
+    """
+    sig_re, sig_im = _visibility_sigma_re_im(noise_map)
+    rng = np.random.RandomState(int(seed))
+    n_realizations = max(int(n_realizations), 1)
+    acc = None
+    for _ in range(n_realizations):
+        noise_vis = (
+            rng.normal(size=sig_re.shape) * sig_re
+            + 1j * rng.normal(size=sig_im.shape) * sig_im
+        )
+        dirty = array2d_to_numpy(
+            transformer.image_from(
+                visibilities=al.Visibilities(visibilities=noise_vis)
+            )
+        )
+        dirty = np.asarray(dirty, dtype=float)
+        if acc is None:
+            acc = dirty**2
+        else:
+            acc += dirty**2
+    return np.sqrt(acc / float(n_realizations))
+
+
+def dirty_noise_map_mc_from_fit(fit, *, n_realizations: int = 8, seed: int = 0):
+    """Monte-Carlo dirty-image RMS for a phase-1 ``FitInterferometer``."""
+    return dirty_noise_map_mc_from(
+        noise_map=fit.dataset.noise_map,
+        transformer=fit.dataset.transformer,
+        n_realizations=n_realizations,
+        seed=seed,
+    )
 
 
 def dirty_mom0_noise_from_channel_noise(channel_noise_cube, z_step_kms):

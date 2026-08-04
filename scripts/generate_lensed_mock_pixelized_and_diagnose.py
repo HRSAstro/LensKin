@@ -11,18 +11,18 @@ This isolates the KinMSPixelized forward model (cloudlet sampling of a fixed
 SB map) from phase-1 reconstruction error.
 
 Visibility noise σ is copied from the template dataprep ``sigma_statwt`` product
-and used for χ² weights. By default the mock is **noiseless** (data = model
-visibilities); pass ``--add-noise`` to draw Gaussian noise ``N(0, σ)`` into the
-data. Residual plots include a noise-normalised panel using a Monte-Carlo
-dirty-image σ propagated from that same visibility σ map.
+and used for χ² weights. **Noise is injected into the mock by default** —
+Autolens pixelized source reconstructions need a realistic noise floor; use
+``--no-noise`` only for exact forward-model checks. Residual plots include a
+noise-normalised panel using a Monte-Carlo dirty-image σ from that same map.
 
 Examples::
 
-  # Generate noiseless mock + pixelized truth residuals
+  # Generate noisy mock + pixelized truth residuals (default)
   python scripts/generate_lensed_mock_pixelized_and_diagnose.py
 
-  # Add noise; reuse existing mock products
-  python scripts/generate_lensed_mock_pixelized_and_diagnose.py --add-noise
+  # Noiseless mock (diagnostic only); reuse existing products
+  python scripts/generate_lensed_mock_pixelized_and_diagnose.py --no-noise
   python scripts/generate_lensed_mock_pixelized_and_diagnose.py --skip-generate
 """
 from __future__ import annotations
@@ -96,6 +96,7 @@ def _pixelized_analysis_from_loaded(
     settings["model_name"] = "KinMSPixelized"
 
     z_step_kms = spectral_utils.z_step_kms_from_data_frequencies(frequencies)
+    autolens_utils.resolve_image_plane_grid_in_settings(settings, uv_wavelengths)
     img_n, img_scale, _ = autolens_utils.image_plane_grid_from_settings(settings)
     image_grid_3d = Grid3D.uniform(
         n_pixels=img_n,
@@ -239,7 +240,7 @@ def diagnose_pixelized(settings, *, plots_dir=None, frozen_cube=None):
     print(f"  plots -> {out}")
     print(
         f"  noise: template sigma_statwt (visibility weights); "
-        f"mock data are noiseless unless generated with --add-noise"
+        f"mock data include injected noise unless generated with --no-noise"
     )
     print(
         f"  frozen cube ceiling:  chi2/N={st_fr['chi_squared_per_datum']:.6e}  "
@@ -473,10 +474,21 @@ def main():
     parser.add_argument("--settings", default=DEFAULT_SETTINGS)
     parser.add_argument("--template-data", default=DEFAULT_TEMPLATE_DATA)
     parser.add_argument("--template-uid", default=DEFAULT_TEMPLATE_UID)
+    parser.set_defaults(add_noise=True)
     parser.add_argument(
         "--add-noise",
         action="store_true",
-        help="Add Gaussian noise drawn from the template sigma map",
+        dest="add_noise",
+        help="Inject Gaussian noise from the template sigma map (default)",
+    )
+    parser.add_argument(
+        "--no-noise",
+        action="store_false",
+        dest="add_noise",
+        help=(
+            "Noiseless mock (data = model). Diagnostic only — Autolens "
+            "pixelized source solutions struggle without a noise floor"
+        ),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
