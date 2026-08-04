@@ -103,8 +103,8 @@ Single-phase fit. No `reconstruction` block is required.
 Two-phase fit. Requires a `reconstruction` block (same phase-1 pixelized source reconstruction as mode 3).
 
 - Phase 1: pixelized source reconstruction on velocity-averaged visibilities
-- Phase 2: parametric `KinMS` disk with free `effective_radius` and kinematic parameters
-- Intensity: `intensity` is set to the velocity-integrated flux of the phase-1 SB map (Jy/km/s, matching KinMS `intFlux`) and is not fitted
+- Phase 2: parametric `KinMS` / `GalPak` disk with free size and kinematic parameters
+- Intensity: `intensity` is locked to the velocity-integrated flux of the phase-1 SB map (not fitted). By default that sum uses only pixels with reconstruction SNR ≥ `flux_snr_threshold` (see [Phase-1 flux SNR cut](#phase-1-flux-snr-cut) below)
 - Example: `settings/runners/kinms_mock_parametric_flux.json`
 
 ```json
@@ -113,7 +113,8 @@ Two-phase fit. Requires a `reconstruction` block (same phase-1 pixelized source 
   "normalization_mode": "parametric_flux_from_phase1",
   "reconstruction": {
     "mesh_type": "delaunay",
-    "regularization": {"type": "constant_split", "prior_type": "fixed", "value": 1e5}
+    "regularization": {"type": "constant_split", "prior_type": "fixed", "value": 1e5},
+    "flux_snr_threshold": 0.5
   },
   "priors": {
     "effective_radius": {"type": "LogUniformPrior", "lower_limit": 0.03, "upper_limit": 0.07}
@@ -144,7 +145,8 @@ Two-phase fit. Requires a `reconstruction` block.
     "clouds_per_pixel": 1024,
     "disk_scale_height_kpc": 0.1,
     "max_radius": null,
-    "sb_input_units": "jy_per_pixel_per_channel"
+    "sb_input_units": "jy_per_pixel_per_channel",
+    "flux_snr_threshold": 0.5
   },
   "priors": {
     "maximum_velocity": {"type": "UniformPrior", "lower_limit": 200.0, "upper_limit": 400.0}
@@ -156,9 +158,10 @@ Two-phase fit. Requires a `reconstruction` block.
 
 Phase-1 / truth SB maps on the KinMS grid are turned into cloudlets by `in_clouds_and_flux_from_sb_map`:
 
-1. Convert the map to velocity-integrated flux (`Jy km/s/pixel`) using `sb_input_units`
-2. Spawn `clouds_per_pixel` clouds per lit pixel (uniform jitter in the pixel; optional exponential `z` scale height)
-3. Pass relative `flux_clouds` weights plus total `intFlux` into KinMS (`cleanOut=True` → `cube.sum() * dv == intFlux`)
+1. Optionally mask the map with `flux_snr_threshold` (default `0.5`) so noise pixels do not enter the cloudlets or total `intFlux`
+2. Convert the map to velocity-integrated flux (`Jy km/s/pixel`) using `sb_input_units`
+3. Spawn `clouds_per_pixel` clouds per lit pixel (uniform jitter in the pixel; optional exponential `z` scale height)
+4. Pass relative `flux_clouds` weights plus total `intFlux` into KinMS (`cleanOut=True` → `cube.sum() * dv == intFlux`)
 
 | Setting | Default | Notes |
 |---------|---------|-------|
@@ -166,12 +169,29 @@ Phase-1 / truth SB maps on the KinMS grid are turned into cloudlets by `in_cloud
 | `reconstruction.disk_scale_height_kpc` | `0.1` | Converted to source-plane arcsec at `redshift_source` |
 | `reconstruction.max_radius` | `null` | Optional arcsec clip of clouds about the phase centre; `null` = no clip |
 | `reconstruction.sb_input_units` | `"jy_per_pixel_per_channel"` | Or `"jy_kms_per_pixel"` if the map is already moment-0 |
+| `reconstruction.flux_snr_threshold` | `0.5` | See [Phase-1 flux SNR cut](#phase-1-flux-snr-cut) |
 
 **Total flux** through the cloud step is conserved exactly. **Spatial** residuals vs a smooth truth map are a cloudlet / re-binning floor (typically \(\lesssim 1\sigma_{\mathrm{dirty}}\) at 1024 clouds on the wide-velocity mock).
 
 For backward compatibility, `model_name: "KinMSPixelized"` without an explicit `normalization_mode` is treated as `"pixelized"`.
 
-GalPaK fits always use mode 1 semantics (`normalization_mode` must be `"parametric"` or omitted).
+### GalPaK kinematic backend (modes 1 and 2)
+
+Set `"model_name": "GalPak"` to build the source cube with GalPaK's `DiskModel._create_cube` instead of KinMS. Supported modes:
+
+| Mode | Support |
+|------|---------|
+| `"parametric"` | Yes (existing) |
+| `"parametric_flux_from_phase1"` | Yes — phase-1 SB still sets total flux |
+| `"pixelized"` | Not yet |
+
+**Flux units:** KinMS `intensity` is Jy km/s (`cube.sum() * dv`). GalPaK `intensity` normalizes so `cube.sum()` equals the flux parameter. Mode 2 therefore converts phase-1 `intFlux` as `intensity = intFlux / z_step_kms` before fixing the prior. The same `flux_snr_threshold` cut applies before that conversion.
+
+Example runners:
+
+- Mode 1: `settings/runners/galpak_mock_unlensed_parametric.json`
+- Mode 2: `settings/runners/galpak_mock_unlensed_parametric_flux.json`
+- Production-style mode 1: `settings/runners/SPT0538_CO9-8.json`
 
 ## Turning lensing off
 
@@ -225,7 +245,32 @@ Per-mode plot layout:
 
 ## Phase-1 pixelized reconstruction
 
-Modes 2 and 3 run a preliminary phase-1 fit before KinMS. Phase 1 builds a **moment-0** `Interferometer` dataset (complex mean over spectral channels), reconstructs the lensed source on the source plane, and passes the SB map (and optionally lens centre / flux) to phase 2.
+Modes 2 and 3 run a preliminary phase-1 fit before KinMS / GalPaK. Phase 1 builds a **moment-0** `Interferometer` dataset (complex mean over spectral channels), reconstructs the lensed source on the source plane, and passes the SB map (and optionally lens centre / flux) to phase 2.
+
+### Phase-1 flux SNR cut
+
+Summing the raw phase-1 reconstruction into a total flux (mode 2) or cloudlet weights (mode 3) includes noise: with `use_positive_only_solver: true`, faint positive noise biases the locked flux high; without it, negative bowls can bias it low.
+
+By default LensKin therefore masks the source map with Autolens per-pixel reconstruction noise before locking flux:
+
+```text
+SNR = SB / inversion.reconstruction_noise_map
+keep pixels with SNR ≥ flux_snr_threshold   (default 0.5)
+```
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `reconstruction.flux_snr_threshold` | `0.5` | Applied in `runner_pixelized` for modes 2 and 3. Phase-1 diagnostic plots still show the **unmasked** SB map |
+| | | Set to `null`, `false`, or `≤ 0` to disable and sum the full map |
+
+```json
+"reconstruction": {
+  "use_positive_only_solver": true,
+  "flux_snr_threshold": 0.5
+}
+```
+
+On the GalPaK self-consistent unlensed mock, `positive_only` + `flux_snr_threshold: 0.5` recovered locked intensity to within ~2% of truth; with no cut the same run was ~34% too bright.
 
 ### Image-plane grid (Nyquist default)
 
@@ -305,6 +350,7 @@ Example `reconstruction` block:
   "disk_scale_height_kpc": 0.1,
   "max_radius": null,
   "sb_input_units": "jy_per_pixel_per_channel",
+  "flux_snr_threshold": 0.5,
   "moment0": {
     "sigma_mode": "independent_mean",
     "sigma_scale": 1.0,

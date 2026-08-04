@@ -74,6 +74,7 @@
     "max_radius": 1.5,
     "use_positive_only_solver": true,
     "sb_input_units": "jy_per_pixel_per_channel",
+    "flux_snr_threshold": 0.5,
     "moment0": {
       "sigma_mode": "independent_mean",
       "sigma_scale": 1.0,

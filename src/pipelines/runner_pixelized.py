@@ -17,6 +17,7 @@ from src.pipelines import reconstruction
 from src.pipelines.normalization import (
     PARAMETRIC_FLUX_FROM_PHASE1,
     PIXELIZED,
+    intensity_from_phase1_intflux,
     priors_for_normalization_mode,
     validate_normalization_settings,
 )
@@ -114,15 +115,24 @@ def run_from_settings(settings):
         n_channels=len(frequencies),
         phase1_result=reconstruction_result,
     )
-    sb_map, lens_centre = reconstruction.source_sb_on_grid(
-        result=reconstruction_result,
-        grid_2d=source_grid_3d.grid_2d,
+    flux_snr_threshold = reconstruction.flux_snr_threshold_from_settings(settings)
+    sb_map, lens_centre, sb_full, _noise_map = (
+        reconstruction.source_sb_for_phase2_flux(
+            result=reconstruction_result,
+            grid_2d=source_grid_3d.grid_2d,
+            snr_threshold=flux_snr_threshold,
+        )
     )
+    if flux_snr_threshold is not None:
+        print(
+            f"  Phase-1 flux SNR cut: threshold={flux_snr_threshold:g} "
+            f"(kept {(np.asarray(sb_map) != 0).sum()} / {np.asarray(sb_map).size} px)"
+        )
 
     if plot_enabled:
         plot_phase1_fit(
             result=reconstruction_result,
-            sb_map=sb_map,
+            sb_map=sb_full,
             output_dir=plots_root / "phase1",
             settings=settings,
             sb_map_extent=autolens_utils.image_extent_from_bounding_box(
@@ -150,21 +160,50 @@ def run_from_settings(settings):
         )
         total_flux = None
     elif mode == PARAMETRIC_FLUX_FROM_PHASE1:
-        profile = profiles.kinMS
-        # KinMS intFlux is in Jy/km/s; convert phase-1 Jy/pixel/channel map first.
-        total_flux = kinms_utils.kinms_intflux_from_sb_map(
+        model_name = settings["model_name"]
+        # Phase-1 map → velocity-integrated flux (Jy km/s), after optional SNR cut.
+        intflux_jy_kms = kinms_utils.kinms_intflux_from_sb_map(
             sb_map=sb_map,
             z_step_kms=z_step_kms,
             n_channels=source_grid_3d.n_channels,
             sb_input_units=sb_input_units,
         )
-        dataset_instance = kinms_utils.make_instance_from_grid(
-            grid_3d=source_grid_3d,
+        total_flux = intensity_from_phase1_intflux(
+            model_name=model_name,
+            intflux_jy_kms=intflux_jy_kms,
             z_step_kms=z_step_kms,
-            attach_grid=True,
-            disk_thick=cloud_kwargs["scale_height_arcsec"],
         )
-        dataset_instance.int_flux = total_flux
+        if model_name == "GalPak":
+            profile = profiles.GalPaK
+            # GalPaK builds on this source-plane grid; Analysis regrids to the
+            # image plane (same path as KinMS when instance.grid_3d is set).
+            dataset_instance = type(
+                "GalPaKInstance",
+                (),
+                {"grid_3d": source_grid_3d, "int_flux": total_flux},
+            )()
+            print(
+                f"  Phase-2 GalPaK intensity fixed from phase-1 flux: "
+                f"{total_flux:.6g} (cube sum; intFlux={intflux_jy_kms:.6g} Jy km/s)"
+            )
+        elif model_name == "KinMS":
+            profile = profiles.kinMS
+            dataset_instance = kinms_utils.make_instance_from_grid(
+                grid_3d=source_grid_3d,
+                z_step_kms=z_step_kms,
+                attach_grid=True,
+                disk_thick=cloud_kwargs["scale_height_arcsec"],
+            )
+            dataset_instance.int_flux = total_flux
+            print(
+                f"  Phase-2 KinMS intensity fixed from phase-1 flux: "
+                f"{total_flux:.6g} Jy km/s"
+            )
+        else:
+            raise ValueError(
+                f"Unsupported model_name for parametric_flux_from_phase1: "
+                f"{model_name!r}"
+            )
     else:
         raise ValueError(
             f"Unsupported normalization_mode for two-phase runner: {mode}"

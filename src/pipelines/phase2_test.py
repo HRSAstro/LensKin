@@ -81,9 +81,11 @@ def run_phase1_for_lens_centre(settings, output_dir=None):
         n_channels=len(frequencies),
         phase1_result=result,
     )
-    sb_map, lens_centre = reconstruction.source_sb_on_grid(
+    flux_snr_threshold = reconstruction.flux_snr_threshold_from_settings(settings)
+    sb_map, lens_centre, sb_full, _noise = reconstruction.source_sb_for_phase2_flux(
         result=result,
         grid_2d=source_grid_3d.grid_2d,
+        snr_threshold=flux_snr_threshold,
     )
     z_step_kms = spectral_utils.z_step_kms_from_data_frequencies(frequencies)
     sb_input_units = settings.get("reconstruction", {}).get(
@@ -112,7 +114,7 @@ def run_phase1_for_lens_centre(settings, output_dir=None):
     if output_dir is not None:
         plot_phase1_fit(
             result=result,
-            sb_map=sb_map,
+            sb_map=sb_full,
             output_dir=Path(output_dir) / "phase1",
             settings=settings,
             sb_map_extent=autolens_utils.image_extent_from_bounding_box(
@@ -123,8 +125,10 @@ def run_phase1_for_lens_centre(settings, output_dir=None):
     return {
         "result": result,
         "sb_map": sb_map,
+        "sb_map_full": sb_full,
         "lens_centre": lens_centre,
         "phase1_total_flux": phase1_total_flux,
+        "flux_snr_threshold": flux_snr_threshold,
         "source_grid_3d": source_grid_3d,
         "frequencies": frequencies,
     }

@@ -285,9 +285,11 @@ def _smoke_two_phase(settings, *, expect_mode, plots_dir=None, mode_label="two_p
         n_channels=len(frequencies),
         phase1_result=result,
     )
-    sb_map, lens_centre = reconstruction.source_sb_on_grid(
+    flux_snr_threshold = reconstruction.flux_snr_threshold_from_settings(settings)
+    sb_map, lens_centre, sb_full, _noise = reconstruction.source_sb_for_phase2_flux(
         result=result,
         grid_2d=source_grid_3d.grid_2d,
+        snr_threshold=flux_snr_threshold,
     )
     flux_threshold = settings["reconstruction"].get("flux_threshold", 0.0)
     sb_input_units = settings["reconstruction"].get(
@@ -363,7 +365,7 @@ def _smoke_two_phase(settings, *, expect_mode, plots_dir=None, mode_label="two_p
         phase1_dir = plots_dir / "phase1"
         plot_phase1_fit(
             result=result,
-            sb_map=sb_map,
+            sb_map=sb_full,
             output_dir=phase1_dir,
             settings=settings,
             sb_map_extent=autolens_utils.image_extent_from_bounding_box(

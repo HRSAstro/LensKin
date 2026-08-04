@@ -1086,6 +1086,46 @@ def phase2_source_grid_from_result(result, n_channels, settings=None):
     )
 
 
+def _scalar_pixel_scale(pixel_scales):
+    """Return a single float pixel scale from a scalar or (y, x) pair."""
+    ps = np.asarray(pixel_scales, dtype=float).ravel()
+    if ps.size == 0:
+        raise ValueError("pixel_scales is empty")
+    return float(ps[0])
+
+
+def _grid_2d_pixel_scale(grid_2d):
+    """Pixel scale (arcsec) of an Autolens / LensKin 2D grid."""
+    if hasattr(grid_2d, "pixel_scales"):
+        return _scalar_pixel_scale(grid_2d.pixel_scales)
+    if hasattr(grid_2d, "pixel_scale"):
+        return float(grid_2d.pixel_scale)
+    raise ValueError(
+        "grid_2d must expose pixel_scales or pixel_scale to convert "
+        "Autolens Jy/image-pixel units onto the destination grid."
+    )
+
+
+def rescale_sb_from_image_pixels(sb_map, image_pixel_scale, grid_pixel_scale):
+    """
+    Convert a map in Jy per **image-plane** pixel to Jy per **grid** pixel.
+
+    Autolens interferometer reconstructions are stored in the same Jy/pixel
+    units as the image-plane mask. When the destination source grid uses a
+    different pixel area, each value must be scaled by
+    ``(grid_pixel_scale / image_pixel_scale)^2`` before summing for KinMS /
+    GalPaK ``intFlux``. Omitting this factor overcounts flux whenever the
+    phase-2 grid is finer than the image grid (typical for mesh-bbox grids).
+    """
+    image_ps = float(image_pixel_scale)
+    grid_ps = float(grid_pixel_scale)
+    if not np.isfinite(image_ps) or image_ps <= 0.0:
+        raise ValueError(f"image_pixel_scale must be positive (got {image_pixel_scale!r})")
+    if not np.isfinite(grid_ps) or grid_ps <= 0.0:
+        raise ValueError(f"grid_pixel_scale must be positive (got {grid_pixel_scale!r})")
+    return np.asarray(sb_map, dtype=float) * (grid_ps / image_ps) ** 2
+
+
 def interpolate_reconstruction_to_grid(
     reconstruction,
     source_plane_mesh_grid,
@@ -1094,14 +1134,15 @@ def interpolate_reconstruction_to_grid(
     """
     Interpolate an inversion reconstruction onto a regular ``grid_2d``.
 
-    Autolens source-pixel values are treated as **surface brightness in the
-    same Jy/pixel units as the interferometer image grid** (not as integrated
-    flux per mesh cell). Linear interpolation onto a finer regular grid must
-    **not** force ``sum(sb_map) == sum(reconstruction)``: for a uniform mesh
-    covering the same area as an ``N``-times finer grid, the sum grows by
-    about ``N²`` because each destination pixel carries Jy in that smaller
-    pixel. Preserving the sum erased that area factor (~4 for 20²→40²) and
-    under-fed KinMS ``intFlux`` by the same amount.
+    Autolens source-pixel values are **surface brightness in Jy per image-plane
+    pixel** (not flux per mesh cell, and not yet Jy per ``grid_2d`` pixel).
+    Linear interpolation onto a finer regular grid must **not** force
+    ``sum(sb_map) == sum(reconstruction)``: for a uniform mesh covering the
+    same area as an ``N``-times finer grid, the sum grows by about ``N²`` while
+    values remain in image-pixel units.
+
+    Callers that need Jy per destination pixel (KinMS / GalPaK normalization)
+    must then apply :func:`rescale_sb_from_image_pixels`.
     """
     reconstruction = np.asarray(reconstruction, dtype=float).ravel()
     source_plane_mesh_grid = np.asarray(source_plane_mesh_grid, dtype=float)
@@ -1131,16 +1172,23 @@ def source_sb_from_fit(fit, grid_2d):
     """
     Interpolate a ``FitInterferometer`` source reconstruction onto ``grid_2d``.
 
-    Returns a map in Jy/pixel (per channel) on ``grid_2d``. See
-    :func:`interpolate_reconstruction_to_grid` for flux / area conventions.
+    Returns a map in Jy per ``grid_2d`` pixel (per channel), converting from
+    Autolens image-plane Jy/pixel units via :func:`rescale_sb_from_image_pixels`.
     """
     inversion = fit.inversion
     mapper = inversion.cls_list_from(cls=al.Mapper)[0]
 
-    return interpolate_reconstruction_to_grid(
+    sb_image_units = interpolate_reconstruction_to_grid(
         reconstruction=_to_numpy(inversion.reconstruction),
         source_plane_mesh_grid=_to_numpy(mapper.source_plane_mesh_grid),
         grid_2d=grid_2d,
+    )
+    image_pixel_scale = _scalar_pixel_scale(fit.dataset.mask.pixel_scales)
+    grid_pixel_scale = _grid_2d_pixel_scale(grid_2d)
+    return rescale_sb_from_image_pixels(
+        sb_image_units,
+        image_pixel_scale=image_pixel_scale,
+        grid_pixel_scale=grid_pixel_scale,
     )
 
 
@@ -1161,3 +1209,91 @@ def source_sb_on_grid(result, grid_2d):
     centre = (float(mass_centre[0]), float(mass_centre[1]))
 
     return sb_map, centre
+
+
+DEFAULT_FLUX_SNR_THRESHOLD = 0.5
+
+
+def flux_snr_threshold_from_settings(settings, default=DEFAULT_FLUX_SNR_THRESHOLD):
+    """
+    SNR cut applied to the phase-1 source map before locking total flux.
+
+    Read from ``reconstruction.flux_snr_threshold``. Default ``0.5``. Set to
+    ``null``, ``false``, or ``<= 0`` to disable (sum the full map).
+    """
+    rec_cfg = (settings or {}).get("reconstruction") or {}
+    if "flux_snr_threshold" not in rec_cfg:
+        if default is None:
+            return None
+        thr = float(default)
+        return None if thr <= 0.0 else thr
+
+    value = rec_cfg["flux_snr_threshold"]
+    if value is None or value is False:
+        return None
+    thr = float(value)
+    if thr <= 0.0:
+        return None
+    return thr
+
+
+def source_noise_on_grid(result, grid_2d):
+    """
+    Interpolate Autolens ``inversion.reconstruction_noise_map`` onto ``grid_2d``.
+
+    Uses the same Jy/image-pixel → Jy/grid-pixel rescale as
+    :func:`source_sb_from_fit`, so ``sb / noise`` is dimensionless SNR.
+    """
+    fit = result.max_log_likelihood_fit
+    inversion = fit.inversion
+    mapper = inversion.cls_list_from(cls=al.Mapper)[0]
+    noise_image_units = interpolate_reconstruction_to_grid(
+        reconstruction=_to_numpy(inversion.reconstruction_noise_map),
+        source_plane_mesh_grid=_to_numpy(mapper.source_plane_mesh_grid),
+        grid_2d=grid_2d,
+    )
+    return rescale_sb_from_image_pixels(
+        noise_image_units,
+        image_pixel_scale=_scalar_pixel_scale(fit.dataset.mask.pixel_scales),
+        grid_pixel_scale=_grid_2d_pixel_scale(grid_2d),
+    )
+
+
+def apply_reconstruction_snr_mask(sb_map, noise_map, snr_threshold):
+    """
+    Zero pixels with ``sb / noise < snr_threshold``.
+
+    Negative SB yields negative SNR and is removed for any positive threshold.
+    If ``snr_threshold`` is ``None``, return ``sb_map`` unchanged.
+    """
+    sb = np.asarray(sb_map, dtype=float)
+    if snr_threshold is None:
+        return sb
+    thr = float(snr_threshold)
+    if thr <= 0.0:
+        return sb
+    noise = np.asarray(noise_map, dtype=float)
+    if noise.shape != sb.shape:
+        raise ValueError(
+            f"noise_map shape {noise.shape} must match sb_map shape {sb.shape}"
+        )
+    snr = np.zeros_like(sb)
+    good = noise > 0.0
+    snr[good] = sb[good] / noise[good]
+    return np.where(snr >= thr, sb, 0.0)
+
+
+def source_sb_for_phase2_flux(result, grid_2d, snr_threshold=DEFAULT_FLUX_SNR_THRESHOLD):
+    """
+    Phase-1 SB on ``grid_2d``, optionally SNR-masked for total-flux locking.
+
+    Returns ``(sb_masked, centre, sb_full, noise_map)``. ``sb_full`` / ``noise_map``
+    are useful for diagnostics; ``sb_masked`` is what should feed
+    ``kinms_intflux_from_sb_map`` / pixelized cloudlets when a threshold is set.
+    """
+    sb_full, centre = source_sb_on_grid(result, grid_2d)
+    if snr_threshold is None or float(snr_threshold) <= 0.0:
+        return sb_full, centre, sb_full, None
+    noise_map = source_noise_on_grid(result, grid_2d)
+    sb_masked = apply_reconstruction_snr_mask(sb_full, noise_map, snr_threshold)
+    return sb_masked, centre, sb_full, noise_map

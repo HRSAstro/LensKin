@@ -11,8 +11,9 @@ from src.utils import kinms_utils
 # NOTE:
 try:
     import galpak
-except:
-    print("\'galpak\' could not be imported")
+except ImportError:  # pragma: no cover - optional dependency
+    galpak = None
+    print("'galpak' could not be imported")
 
 
 # ============================================================================ #
@@ -37,6 +38,11 @@ class GalPaK(Abstract):
         maximum_velocity: float = 200.0,
         velocity_dispersion: float = 50.0,
     ):
+        if galpak is None:
+            raise ImportError(
+                "GalPaK requires the 'galpak' package "
+                "(pip install 'galpak==1.34.0')."
+            )
         super(GalPaK, self).__init__()
 
         self.centre = centre
@@ -170,11 +176,16 @@ class GalPaK(Abstract):
 
     # NOTE: ...
     def profile_cube_from_masked_dataset(self, masked_dataset):
-
+        grid_3d = masked_dataset.grid_3d
+        instance = masked_dataset.instance
+        # Mode-2 attaches a source-plane grid on the instance (phase-1 bbox);
+        # fall back to the image-plane mask grid for mode-1 GalPaK.
+        if instance is not None and getattr(instance, "grid_3d", None) is not None:
+            grid_3d = instance.grid_3d
         return self.profile_cube_from_grid(
-            grid_3d=masked_dataset.grid_3d,
+            grid_3d=grid_3d,
             z_step_kms=masked_dataset.z_step_kms,
-            instance=masked_dataset.instance,
+            instance=instance,
         )
 
 # ============================================================================ #

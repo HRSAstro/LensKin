@@ -1203,9 +1203,13 @@ def _build_pipeline(settings, run_phase1=False, lens_centre_mode="fixed"):
             n_channels=len(frequencies),
             phase1_result=phase1_result,
         )
-        sb_map, lens_centre_phase1 = reconstruction.source_sb_on_grid(
-            result=phase1_result,
-            grid_2d=kinms_grid_3d.grid_2d,
+        flux_snr_threshold = reconstruction.flux_snr_threshold_from_settings(settings)
+        sb_map, lens_centre_phase1, _sb_full, _noise = (
+            reconstruction.source_sb_for_phase2_flux(
+                result=phase1_result,
+                grid_2d=kinms_grid_3d.grid_2d,
+                snr_threshold=flux_snr_threshold,
+            )
         )
         sb_input_units = settings.get("reconstruction", {}).get(
             "sb_input_units", "jy_per_pixel_per_channel"

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Unlensed kinematic mock: isolate KinMS + UV path from gravitational lensing.
+Unlensed kinematic mock: isolate KinMS/GalPaK + UV path from gravitational lensing.
 
 Reuses existing ALMA UV coverage / noise from a template dataprep product,
-forward-models an unlensed KinMS cube (identity mass, θ_E=0) through the same
+forward-models an unlensed cube (identity mass, θ_E=0) through the same
 LensKin transformers used in fits, writes a new data directory, and evaluates
 the truth model.
+
+Supports ``model_name: "KinMS"`` (default) or ``"GalPak"`` via the settings
+JSON / truth_parameters.
 
 This skips CASA entirely — residuals are then due to KinMS cloudlet sampling
 and/or injected noise, not lens ray-tracing or simobserve flux conventions.
@@ -144,7 +147,7 @@ def _analysis_from_loaded(settings, frequencies, uv_wavelengths, visibilities, s
         pixel_scale=img_scale,
         n_channels=len(frequencies),
     )
-    kinms_grid_3d = autolens_utils.kinms_source_grid_3d(
+    source_grid_3d = autolens_utils.kinms_source_grid_3d(
         settings, n_channels=len(frequencies)
     )
     dataset = Dataset(
@@ -153,12 +156,19 @@ def _analysis_from_loaded(settings, frequencies, uv_wavelengths, visibilities, s
         noise_map=sigma,
         z_step_kms=z_step_kms,
     )
-    dataset_instance = kinms_utils.make_instance_from_grid(
-        grid_3d=kinms_grid_3d,
-        z_step_kms=z_step_kms,
-        attach_grid=True,
-        disk_thick=kinms_utils.disk_scale_height_arcsec_from_settings(settings),
-    )
+    model_name = settings.get("model_name", "KinMS")
+    if model_name == "GalPak":
+        # GalPaK only needs the source-plane grid for cube building / regridding.
+        dataset_instance = type(
+            "GalPaKGridInstance", (), {"grid_3d": source_grid_3d}
+        )()
+    else:
+        dataset_instance = kinms_utils.make_instance_from_grid(
+            grid_3d=source_grid_3d,
+            z_step_kms=z_step_kms,
+            attach_grid=True,
+            disk_thick=kinms_utils.disk_scale_height_arcsec_from_settings(settings),
+        )
     mask_3d = Mask3D.unmasked(
         n_channels=image_grid_3d.n_channels,
         shape_2d=image_grid_3d.shape_2d,
@@ -236,11 +246,16 @@ def generate_mock(
     )
     instance = truth_instance_from_settings(settings)
 
-    # Freeze one KinMS realization for the mock sky.
+    # Freeze one kinematic realization for the mock sky (KinMS or GalPaK).
     source_cube = analysis.model_cube_from_instance(instance=instance)
     flip_y = bool(getattr(analysis, "_flip_kinms_y", True))
     image_grid = analysis.masked_dataset.grid_3d.grid_2d
-    source_grid_2d = analysis.masked_dataset.instance.grid_3d.grid_2d
+    inst = analysis.masked_dataset.instance
+    source_grid_2d = (
+        inst.grid_3d.grid_2d
+        if inst is not None and getattr(inst, "grid_3d", None) is not None
+        else None
+    )
     lensed_cube = analysis_utils.lensed_cube_from_tracer(
         cube=source_cube,
         tracer=analysis.tracer,
@@ -345,7 +360,12 @@ def diagnose(settings, *, plots_dir=None, frozen_cube=None):
             tracer=analysis.tracer,
             grid=analysis.masked_dataset.grid_3d.grid_2d,
             z_mask=analysis.masked_dataset.mask_3d.z_mask,
-            source_grid_2d=analysis.masked_dataset.instance.grid_3d.grid_2d,
+        source_grid_2d=(
+                analysis.masked_dataset.instance.grid_3d.grid_2d
+                if analysis.masked_dataset.instance is not None
+                and getattr(analysis.masked_dataset.instance, "grid_3d", None) is not None
+                else None
+            ),
             output_shape=analysis.masked_dataset.grid_3d.shape_2d,
             flip_kinms_y=flip_y,
         )

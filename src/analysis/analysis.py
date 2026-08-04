@@ -263,6 +263,8 @@ class Analysis(af.Analysis):
         )
 
         instance_obj = self.masked_dataset.instance
+        source_grid_2d = None
+        output_shape = None
         if instance_obj is not None and getattr(instance_obj, "grid_3d", None) is not None:
             source_grid_2d = instance_obj.grid_3d.grid_2d
             output_shape = self.masked_dataset.grid_3d.shape_2d
